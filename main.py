@@ -1,9 +1,20 @@
-# main.py — FastAPI entrypoint (Railway/Docker friendly)
+# main.py — FastAPI entrypoint for Glass
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from webhooks_gumroad import router as gumroad_router, ensure_tables
 
-app = FastAPI(title="Glass Licensing API", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Ensure DB tables exist before serving requests (SQLite or Postgres)
+    ensure_tables()
+    yield  # shutdown hooks would go after this if needed
+
+app = FastAPI(
+    title="Glass Licensing API",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 @app.get("/")
 def root():
@@ -13,17 +24,19 @@ def root():
 def healthz():
     return {"ok": True}
 
-@app.on_event("startup")
-async def _startup():
-    # Make sure DB table exists (works for SQLite or Postgres)
-    ensure_tables()
+# Mount Gumroad webhook routes at both paths:
+#   /gumroad                (handy for local/manual tests)
+#   /webhooks/gumroad       (what Gumroad should call in production)
+app.include_router(gumroad_router)                     # /gumroad
+app.include_router(gumroad_router, prefix="/webhooks") # /webhooks/gumroad
 
-# Mount Gumroad routes (/webhooks/gumroad and /gumroad)
-app.include_router(gumroad_router)
-
-# Local dev launcher: `python main.py`
+# Local dev: `python main.py`
 if __name__ == "__main__":
     import os
     import uvicorn
-    port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000")),
+        reload=True,
+    )
