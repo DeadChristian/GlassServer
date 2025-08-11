@@ -62,6 +62,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Optional global IP-based rate limiter (skip if package not present)
+try:
+    from ratelimit import RateLimiter  # type: ignore
+    app.add_middleware(RateLimiter, limit=10, window_seconds=10)
+    print("[BOOT] RateLimiter enabled")
+except Exception as e:
+    print("[BOOT] RateLimiter not enabled:", repr(e))
+
 # Global IP-based rate limiter (10 req / 10s)
 app.add_middleware(RateLimiter, limit=10, window_seconds=10)
 
