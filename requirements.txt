@@ -1,6 +1,8 @@
 fastapi
-uvicorn
+uvicorn[standard]        # faster wheels (uvloop, httptools)
 python-multipart
 httpx
-psycopg[binary]==3.1.18
-
+psycopg[binary]==3.1.18  # correct for psycopg v3
+aiofiles                 # helpful for StaticFiles (serving /launch)
+# optional (local dev):
+# python-dotenv
