@@ -31,6 +31,7 @@ except Exception:
     def send_mail(to: str, subject: str, body: str) -> None:
         print(f"[MAILER-STUB] to={to!r} subject={subject!r}\n{body}")
 
+
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -69,11 +70,16 @@ try:
 except Exception as e:
     print("[BOOT] RateLimiter not enabled:", repr(e))
 
+
 # Core API: referrals/verify/download
 app.include_router(ref_router)
 
 # Static site mounted at /launch (place index.html, styles.css, etc. in ./web/)
-app.mount("/launch", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
+app.mount(
+    "/launch",
+    StaticFiles(directory=str(WEB_DIR), html=True, check_dir=False),
+    name="web",
+)
 
 
 # -------------------- Core utility routes --------------------
