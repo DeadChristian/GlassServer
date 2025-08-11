@@ -41,26 +41,35 @@ SKIP_GUMROAD_VALIDATION = _env_true("SKIP_GUMROAD_VALIDATION")
 GUMROAD_WEBHOOK_SECRET = (os.getenv("GUMROAD_WEBHOOK_SECRET") or "").strip()
 DRY_RUN = _env_true("DRY_RUN")
 
-# ---------- DB table ----------
-execute("""
-CREATE TABLE IF NOT EXISTS gumroad_sales (
-    sale_id TEXT PRIMARY KEY,
-    order_number TEXT,
-    product_id TEXT,
-    product_name TEXT,
-    product_permalink TEXT,
-    buyer_email TEXT,
-    full_name TEXT,
-    price_cents INTEGER,
-    quantity INTEGER,
-    license_key TEXT,
-    refunded INTEGER DEFAULT 0,
-    subscription_id TEXT,
-    sale_timestamp TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    raw_json TEXT
-)
-""")
+# --- DB table creation (with retry) ---
+def ensure_tables():
+    import time
+    sql = """
+    CREATE TABLE IF NOT EXISTS gumroad_sales (
+        sale_id TEXT PRIMARY KEY,
+        order_number TEXT,
+        product_id TEXT,
+        product_name TEXT,
+        product_permalink TEXT,
+        buyer_email TEXT,
+        full_name TEXT,
+        price_cents INTEGER,
+        quantity INTEGER,
+        license_key TEXT,
+        refunded INTEGER DEFAULT 0,
+        subscription_id TEXT,
+        sale_timestamp TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        raw_json TEXT
+    )
+    """
+    for attempt in range(20):  # ~20s total
+        try:
+            execute(sql)
+            return
+        except Exception as e:
+            time.sleep(1)
+
 
 # ---------- Helpers ----------
 def _bad(msg: str) -> HTTPException:
