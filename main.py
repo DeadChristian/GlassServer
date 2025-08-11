@@ -4,8 +4,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import os
 
-from fastapi import Response
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi import APIRouter
@@ -24,7 +23,7 @@ try:
 except Exception:
     lemon_router = APIRouter()
 
-from db import query_all
+from db import query_all, execute
 from mailer import send_mail
 
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
@@ -38,6 +37,16 @@ async def lifespan(app: FastAPI):
         ensure_tables()
     except Exception:
         pass
+
+    # Startup migration: add licenses.revoked (safe if already exists)
+    try:
+        execute("ALTER TABLE licenses ADD COLUMN revoked INTEGER DEFAULT 0")
+    except Exception:
+        try:
+            execute("ALTER TABLE licenses ADD COLUMN IF NOT EXISTS revoked INTEGER DEFAULT 0")
+        except Exception:
+            pass
+
     yield  # add shutdown cleanup here if needed
 
 
@@ -88,6 +97,7 @@ def public_config(response: Response):
         "price": os.getenv("PRO_PRICE", "9.99"),
     }
 
+
 # -------------------- Admin JSON + tools --------------------
 
 def _check_admin(secret: str):
@@ -97,7 +107,6 @@ def _check_admin(secret: str):
 @app.post("/admin/migrate/add-revoked")
 def admin_migrate_add_revoked(secret: str = Query(...)):
     _check_admin(secret)
-    # Try plain ADD; if exists, try IF NOT EXISTS; otherwise ignore
     tried = []
     try:
         execute("ALTER TABLE licenses ADD COLUMN revoked INTEGER DEFAULT 0")
@@ -147,8 +156,7 @@ def admin_test_email(to: str = Query(...), secret: str = Query(...)):
 
 @app.get("/admin/ui", response_class=HTMLResponse)
 def admin_ui():
-    html = r"""
-<!doctype html>
+    html = r"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
