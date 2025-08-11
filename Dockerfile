@@ -1,5 +1,3 @@
-notepad Dockerfile
-# Dockerfile
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -7,19 +5,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# (optional) small system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# App code
 COPY . .
 
-# Railway gives $PORT at runtime. Default 8000 for local docker runs.
 ENV PORT=8000
 EXPOSE 8000
 
