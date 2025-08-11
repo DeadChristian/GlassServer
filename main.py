@@ -24,7 +24,13 @@ except Exception:
     lemon_router = APIRouter()
 
 from db import query_all, execute
-from mailer import send_mail
+
+# Robust mail import (stub if missing)
+try:
+    from mailer import send_mail
+except Exception:
+    def send_mail(to, subject, body):
+        print(f"[MAILER-STUB] to={to!r} subject={subject!r}\n{body}")
 
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
 WEB_DIR = Path(__file__).parent / "web"
