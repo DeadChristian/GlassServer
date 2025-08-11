@@ -94,6 +94,25 @@ def _check_admin(secret: str):
     if not ADMIN_SECRET or secret != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
 
+@app.post("/admin/migrate/add-revoked")
+def admin_migrate_add_revoked(secret: str = Query(...)):
+    _check_admin(secret)
+    # Try plain ADD; if exists, try IF NOT EXISTS; otherwise ignore
+    tried = []
+    try:
+        execute("ALTER TABLE licenses ADD COLUMN revoked INTEGER DEFAULT 0")
+        tried.append("added")
+        return {"ok": True, "result": "added"}
+    except Exception as e1:
+        tried.append(f"plain_failed:{type(e1).__name__}")
+        try:
+            execute("ALTER TABLE licenses ADD COLUMN IF NOT EXISTS revoked INTEGER DEFAULT 0")
+            tried.append("if_not_exists_added")
+            return {"ok": True, "result": "added_if_not_exists"}
+        except Exception as e2:
+            tried.append(f"if_not_exists_failed:{type(e2).__name__}")
+            return {"ok": True, "result": "probably_exists", "detail": tried}
+
 @app.get("/admin/sales")
 def admin_sales(secret: str, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
     _check_admin(secret)
