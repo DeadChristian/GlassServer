@@ -59,3 +59,68 @@ else:
         cur = _sqlite.execute(sql, params or {})
         rows = cur.fetchall()
         return [dict(r) for r in rows]
+
+# ---- Compatibility shim: get_conn() for code that uses raw cursors ----
+import os
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///glass.db")
+_IS_PG = DATABASE_URL.startswith(("postgres://", "postgresql://"))
+
+if _IS_PG:
+    # Postgres: simple passthrough (works with "with get_conn() as conn, conn.cursor() as cur")
+    import psycopg
+
+    def get_conn():
+        # autocommit False so "with" context can commit/rollback
+        return psycopg.connect(DATABASE_URL)
+else:
+    # SQLite: provide a connection + cursor that behave as context managers
+    import sqlite3
+
+    class _SqliteCursorCtx:
+        def __init__(self, conn):
+            self._conn = conn
+            self._cur = None
+
+        def __enter__(self):
+            self._cur = self._conn.cursor()
+            return self._cur
+
+        def __exit__(self, exc_type, exc, tb):
+            try:
+                self._cur.close()
+            except Exception:
+                pass
+
+    class _SqliteConnProxy:
+        def __init__(self, path):
+            self._conn = sqlite3.connect(path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+
+        # allow: "with get_conn() as conn, conn.cursor() as cur:"
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            try:
+                if exc_type:
+                    self._conn.rollback()
+                else:
+                    self._conn.commit()
+            finally:
+                self._conn.close()
+
+        def cursor(self):
+            return _SqliteCursorCtx(self._conn)
+
+        # expose commit/rollback for any code that calls them
+        def commit(self):
+            self._conn.commit()
+
+        def rollback(self):
+            self._conn.rollback()
+
+    def get_conn():
+        # support sqlite:///path or bare path
+        path = DATABASE_URL.replace("sqlite:///", "") if DATABASE_URL.startswith("sqlite:///") else DATABASE_URL
+        return _SqliteConnProxy(path)
