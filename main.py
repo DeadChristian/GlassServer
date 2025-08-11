@@ -24,19 +24,10 @@ def root():
 def healthz():
     return {"ok": True}
 
-# Mount Gumroad webhook routes at both paths:
-#   /gumroad                (handy for manual tests)
-#   /webhooks/gumroad       (your production webhook URL)
+# Webhook routes at both paths
 app.include_router(gumroad_router)                     # /gumroad
 app.include_router(gumroad_router, prefix="/webhooks") # /webhooks/gumroad
 
-# Local dev: `python main.py`
 if __name__ == "__main__":
-    import os
-    import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "8000")),
-        reload=True,
-    )
+    import os, uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
