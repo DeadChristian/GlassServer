@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Not Found — Glass</title>
+  <link rel="stylesheet" href="/launch/styles.css" />
+  <link rel="icon" type="image/svg+xml" href="/launch/logo.svg" />
+  <style>
+    .nf { text-align:center; padding:64px 24px }
+    .nf h1 { font-size:40px; margin:0 0 8px }
+    .nf p { color: var(--muted); margin: 0 0 20px }
+  </style>
+</head>
+<body>
+  <header class="wrap header">
+    <a href="/launch" class="logo-link">
+      <img src="/launch/logo.svg" alt="Glass Logo" class="logo" width="48" height="48" />
+    </a>
+    <nav>
+      <a href="/launch">Home</a>
+      <a href="/launch/privacy.html">Privacy</a>
+      <a href="/launch/terms.html">Terms</a>
+    </nav>
+  </header>
+
+  <main class="wrap nf">
+    <h1>404 — Page not found</h1>
+    <p>That link doesn’t exist. Try going back to the homepage.</p>
+    <p><a class="btn" href="/launch">← Back to Home</a></p>
+  </main>
+
+  <footer class="wrap footer">
+    <p>&copy; <span id="year"></span> Glass</p>
+  </footer>
+
+  <script>document.getElementById('year').textContent = new Date().getFullYear();</script>
+</body>
+</html>

@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Glass — Control any window’s transparency</title>
+  <meta name="description" content="Glass lets you control any window's transparency on Windows. Free (2 windows), Share to unlock 3, Pro = Unlimited." />
+  <link rel="icon" type="image/svg+xml" href="/launch/logo.svg" />
+  <link rel="stylesheet" href="/launch/styles.css" />
+</head>
+<body>
+  <header class="wrap header">
+    <a href="/launch" class="logo-link">
+      <img src="/launch/logo.svg" alt="Glass" class="logo" width="44" height="44" />
+    </a>
+    <nav>
+      <a href="/launch" class="active">Home</a>
+      <a href="/launch/privacy.html">Privacy</a>
+      <a href="/launch/terms.html">Terms</a>
+    </nav>
+  </header>
+
+  <section class="wrap hero">
+    <h1>Glass</h1>
+    <p class="tagline">Control any window’s transparency on Windows.</p>
+
+    <div class="cta">
+      <a id="downloadBtn" class="btn primary" href="/download/windows">Download Free</a>
+      <a id="buyPro" class="btn disabled" href="#" aria-disabled="true">Pro (coming soon)</a>
+    </div>
+
+    <p class="sub">Free: 2 windows • Share to unlock 3 • Pro: Unlimited</p>
+
+    <video class="demo" autoplay loop muted playsinline src="/launch/assets/demo.mp4"></video>
+  </section>
+
+  <section class="wrap grid">
+    <div>
+      <h2>Features</h2>
+      <ul>
+        <li>Make any app window transparent</li>
+        <li>Clean UI, hotkeys, and quick toggles</li>
+        <li>No telemetry — works offline</li>
+      </ul>
+    </div>
+    <div>
+      <h2>Unlocking</h2>
+      <ul>
+        <li><strong>Free:</strong> 2 windows</li>
+        <li><strong>Share to 3:</strong> Post your link on Discord. When one friend installs within 24h, this PC gets 3 windows forever.</li>
+        <li><strong>Pro:</strong> Unlimited windows — <span id="price">$9.99</span> one-time. <em>Launch deal: $5</em></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="wrap">
+    <h2>Keyboard Shortcuts</h2>
+    <ul class="kbd-list">
+      <li><span class="kbd">Ctrl</span> + <span class="kbd">Alt</span> + <span class="kbd">↑</span> — Increase transparency</li>
+      <li><span class="kbd">Ctrl</span> + <span class="kbd">Alt</span> + <span class="kbd">↓</span> — Decrease transparency</li>
+      <li><span class="kbd">Ctrl</span> + <span class="kbd">Alt</span> + <span class="kbd">0</span> — Reset to opaque</li>
+      <li><span class="kbd">Ctrl</span> + <span class="kbd">Alt</span> + <span class="kbd">G</span> — Toggle Glass overlay</li>
+      <li><span class="kbd">Ctrl</span> + <span class="kbd">Alt</span> + <span class="kbd">L</span> — Get referral link</li>
+    </ul>
+    <p class="muted">You can change hotkeys in Settings. Some combos may require admin mode if another app grabs them first.</p>
+  </section>
+
+  <section class="wrap">
+    <h2>Changelog</h2>
+    <ul class="changelog" id="changelogList"></ul>
+  </section>
+
+  <section class="wrap">
+    <h2>Refunds</h2>
+    <p>Digital license, delivered immediately. <b>All sales are final.</b>
+       If a payment is reversed/charged back, the license will be revoked.
+       Try the Free version first to ensure compatibility.</p>
+  </section>
+
+  <section class="wrap">
+    <h2>FAQ</h2>
+    <p><strong>How does the referral work?</strong> In the app, click “Get referral link.” Share it. If someone clicks and installs within 24 hours, your PC unlocks 3 windows.</p>
+    <p><strong>Privacy?</strong> We only verify your tier online (minimal IP/UA logs for fraud prevention). No usage telemetry.</p>
+    <p><strong>Support?</strong> Email us: <a href="mailto:support@glassapp.me">support@glassapp.me</a></p>
+  </section>
+
+  <footer class="wrap footer">
+    <p>© <span id="year"></span> Glass. All rights reserved.</p>
+  </footer>
+
+  <script>
+  // (1) Referral logging + sticky download link
+  (function(){
+    const p = new URLSearchParams(location.search);
+    const code = p.get('ref');
+    if (code) {
+      fetch(`/ref/click?code=${encodeURIComponent(code)}`, { method:'POST', keepalive:true });
+      const dl = document.getElementById('downloadBtn');
+      if (dl) dl.href = `/download/windows?ref=${encodeURIComponent(code)}`;
+      const u = new URL(location); u.searchParams.set('ref', code); history.replaceState({}, '', u);
+    }
+  })();
+
+  // (2) Public config toggle for Pro (needs /public-config route in your API)
+  (function(){
+    fetch('/public-config', { cache:'no-store' })
+      .then(r => r.ok ? r.json() : null)
+      .then(cfg => {
+        const buy = document.getElementById('buyPro');
+        const price = document.getElementById('price');
+        if (!buy || !cfg) return;
+        if (cfg.pro_sales_enabled) {
+          if (cfg.buy_url) buy.href = cfg.buy_url;
+          if (cfg.price && price) price.textContent = `$${cfg.price}`;
+          buy.textContent = `Buy Pro ($${cfg.price || '9.99'})`;
+          buy.classList.remove('disabled');
+          buy.removeAttribute('aria-disabled');
+        } else {
+          buy.textContent = 'Pro (coming soon)';
+          buy.href = '#';
+          buy.classList.add('disabled');
+          buy.setAttribute('aria-disabled','true');
+        }
+      }).catch(()=>{});
+  })();
+
+  // (3) Changelog (optional): /launch/changelog.json
+  (function(){
+    fetch('/launch/changelog.json', { cache:'no-store' })
+      .then(r=> r.ok ? r.json() : [])
+      .then(items => {
+        const ul = document.getElementById('changelogList');
+        if (!ul || !items.length) return;
+        ul.innerHTML = items.map(it => `
+          <li>
+            <div class="chg-head">
+              <span class="chg-ver">${it.version}</span>
+              <span class="chg-date">${it.date || ''}</span>
+            </div>
+            <div>${it.notes}</div>
+          </li>`).join('');
+      }).catch(()=>{});
+  })();
+
+  // (4) Footer year
+  document.getElementById('year').textContent = new Date().getFullYear();
+  </script>
+</body>
+</html>

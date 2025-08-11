@@ -1,25 +1,63 @@
 # main.py — FastAPI entrypoint for Glass (Railway/Docker friendly)
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 import os
-from fastapi.responses import HTMLResponse
+
+from fastapi import Response
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi import APIRouter
+
+from ratelimit import RateLimiter
+from referral_endpoints import router as ref_router
 from webhooks_gumroad import router as gumroad_router, ensure_tables
+
+# Optional: Stripe & LemonSqueezy routers (fallback to empty if files not present)
+try:
+    from webhooks_stripe import router as stripe_router
+except Exception:
+    stripe_router = APIRouter()
+try:
+    from webhooks_lemonsqueezy import router as lemon_router
+except Exception:
+    lemon_router = APIRouter()
+
 from db import query_all
+from mailer import send_mail
 
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
+WEB_DIR = Path(__file__).parent / "web"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Ensure DB tables exist before serving requests (SQLite or Postgres)
-    ensure_tables()
-    yield  # add shutdown cleanup after this if needed
+    try:
+        ensure_tables()
+    except Exception:
+        pass
+    yield  # add shutdown cleanup here if needed
+
 
 app = FastAPI(
     title="Glass Licensing API",
-    version="1.0.0",
+    version=os.getenv("APP_VERSION", "1.0.0"),
     lifespan=lifespan,
 )
+
+# Global IP-based rate limiter (10 req / 10s)
+app.add_middleware(RateLimiter, limit=10, window_seconds=10)
+
+# Core API: referrals/verify/download
+app.include_router(ref_router)
+
+# Static site mounted at /launch (place index.html, styles.css, etc. in ./web/)
+app.mount("/launch", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
+
+
+# -------------------- Core utility routes --------------------
 
 @app.get("/")
 def root():
@@ -29,7 +67,29 @@ def root():
 def healthz():
     return {"ok": True}
 
-# ---- Admin JSON viewer ----
+@app.get("/version")
+def version():
+    return {
+        "ok": True,
+        "app": "glass",
+        "version": os.getenv("APP_VERSION", "0.0.0"),
+        "git": os.getenv("GIT_SHA", "unknown"),
+    }
+
+@app.get("/public-config")
+def public_config(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    def on(name, default="0"):
+        return os.getenv(name, default).lower() in ("1","true","yes","on")
+    return {
+        "app": "glass",
+        "pro_sales_enabled": on("PRO_SALES_ENABLED", "0"),
+        "buy_url": os.getenv("BUY_URL", ""),
+        "price": os.getenv("PRO_PRICE", "9.99"),
+    }
+
+# -------------------- Admin JSON + tools --------------------
+
 def _check_admin(secret: str):
     if not ADMIN_SECRET or secret != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -57,7 +117,15 @@ def admin_sale_by_id(sale_id: str, secret: str):
         raise HTTPException(status_code=404, detail="Not found")
     return {"ok": True, "sale": rows[0]}
 
-# ---- Admin HTML viewer (no templates, no extra files) ----
+@app.post("/admin/test-email")
+def admin_test_email(to: str = Query(...), secret: str = Query(...)):
+    _check_admin(secret)
+    send_mail(to, "Glass test", "It works! – Glass")
+    return {"ok": True}
+
+
+# -------------------- Inline Admin UI (HTML-only) --------------------
+
 @app.get("/admin/ui", response_class=HTMLResponse)
 def admin_ui():
     html = r"""
@@ -70,7 +138,7 @@ def admin_ui():
   <style>
     :root { --bg:#0f1115; --card:#161a22; --muted:#9aa7b5; --text:#e6edf3; --accent:#6ea8fe; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; }
     * { box-sizing: border-box; }
-    html,body { margin:0; padding:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", Apple Color Emoji, Segoe UI Emoji; }
+    html,body { margin:0; padding:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial; }
     header { padding:16px 20px; border-bottom:1px solid #212836; background:var(--card); position:sticky; top:0; z-index:10;}
     h1 { font-size:16px; margin:0; letter-spacing:.2px; }
     .muted { color:var(--muted); }
@@ -91,7 +159,6 @@ def admin_ui():
     .foot { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:10px; }
     .link { color:#cfe0ff; }
     .small { font-size:12px; }
-    .hide { display:none; }
   </style>
 </head>
 <body>
@@ -153,7 +220,6 @@ def admin_ui():
   limitSel.value = String(limit);
 
   function setStatus(s){ status.textContent = s || ''; }
-
   function fmtMoney(cents){ if(cents==null) return '-'; return '$'+(cents/100).toFixed(2); }
   function esc(s){ return (s||'').toString().replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
 
@@ -253,7 +319,6 @@ def admin_ui():
     URL.revokeObjectURL(a.href);
   };
 
-  // initial auto-load with existing URL params
   if(secret) load();
 })();
 </script>
@@ -262,10 +327,33 @@ def admin_ui():
     """
     return HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
 
-# Webhook routes at both paths
-app.include_router(gumroad_router)                     # /gumroad
-app.include_router(gumroad_router, prefix="/webhooks") # /webhooks/gumroad
+
+# -------------------- Payments routers --------------------
+
+# New namespaced routes under /payments/*
+app.include_router(gumroad_router,   prefix="/payments")     # /payments/gumroad
+app.include_router(stripe_router,    prefix="/payments")     # /payments/stripe
+app.include_router(lemon_router,     prefix="/payments")     # /payments/lemonsqueezy
+
+# Back-compat legacy paths for Gumroad
+app.include_router(gumroad_router)                           # /gumroad
+app.include_router(gumroad_router, prefix="/webhooks")       # /webhooks/gumroad
+
+
+# -------------------- Nice 404 for /launch --------------------
+
+@app.exception_handler(404)
+async def not_found(request, exc):
+    # Return static 404 for /launch paths; otherwise JSON
+    if str(request.url.path).startswith("/launch"):
+        nf = WEB_DIR / "404.html"
+        if nf.exists():
+            return FileResponse(nf, status_code=404)
+    return JSONResponse({"detail": "Not Found"}, status_code=404)
+
+
+# -------------------- Uvicorn local run --------------------
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))

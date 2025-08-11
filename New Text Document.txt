@@ -1,0 +1,46 @@
+<!-- GlassServer/web/index.html -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Glass — Control Window Transparency</title>
+  <link rel="stylesheet" href="/launch/styles.css" />
+</head>
+<body>
+  <main class="wrap">
+    <h1>Glass</h1>
+    <p class="tag">Free: 2 windows · Share to Unlock 3 · Pro: Unlimited</p>
+
+    <div class="cta">
+      <a id="dl" class="btn" href="/download/windows">Download Free</a>
+      <a class="btn alt" href="https://your-gumroad-link">Buy Pro — $9.99</a>
+    </div>
+    <p class="muted">Launch deal: $5 for a limited time.</p>
+
+    <section class="faq">
+      <h2>How it works</h2>
+      <ul>
+        <li><b>Free</b>: Control up to 2 windows.</li>
+        <li><b>Share to Unlock 3</b>: Post your link on Discord—when one friend installs within 24h, your PC unlocks 3 windows forever.</li>
+        <li><b>Pro</b>: Unlimited windows. After purchase, your machine upgrades automatically on the next check.</li>
+      </ul>
+    </section>
+  </main>
+
+  <script>
+  // referral logging + sticky download link
+  (function(){
+    const p = new URLSearchParams(location.search);
+    const code = p.get('ref');
+    if (code) {
+      fetch(`/ref/click?code=${encodeURIComponent(code)}`, {method:'POST', keepalive:true});
+      document.getElementById('dl').href = `/download/windows?ref=${encodeURIComponent(code)}`;
+      const u = new URL(location);
+      u.searchParams.set('ref', code);
+      history.replaceState({}, '', u);
+    }
+  })();
+  </script>
+</body>
+</html>

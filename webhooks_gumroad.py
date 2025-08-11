@@ -5,11 +5,17 @@ import json
 import time
 import hmac
 import hashlib
+import secrets, string
 from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, Request, HTTPException
 from starlette.responses import JSONResponse
 from urllib.parse import parse_qs
+
+# DB helpers use :name placeholders (db.py adapts for Postgres/SQLite)
+from db import execute, query_one
+from db import get_conn  # only used for rare connection-level ops
+from mailer import send_mail
 
 # Optional httpx for license verification; safe to omit
 try:
@@ -17,14 +23,7 @@ try:
 except Exception:
     httpx = None  # type: ignore
 
-from db import execute, query_one  # uses :name placeholders (db.py adapts for Postgres)
-
-# Optional mailer/signing (no-ops if not present)
-try:
-    from mailer import send_license_email  # async def send_license_email(...)
-except Exception:
-    send_license_email = None  # type: ignore
-
+# Optional action signer (not required for this flow)
 try:
     from utils import sign_action
 except Exception:
@@ -47,7 +46,6 @@ ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
 
 # ---- Table creation (Postgres + SQLite)
 def ensure_tables():
-    import time
     ddl = """
     CREATE TABLE IF NOT EXISTS gumroad_sales (
         sale_id TEXT PRIMARY KEY,
@@ -67,12 +65,58 @@ def ensure_tables():
         raw_json TEXT
     )
     """
+    # retry a bit on boot race conditions
     for _ in range(20):
         try:
             execute(ddl); return
         except Exception as e:
             print("DDL_RETRY:", repr(e)); time.sleep(1)
 
+# ---- License helpers (DB-agnostic via execute/query_one)
+
+def _make_license_key():
+    alphabet = string.ascii_uppercase + string.digits
+    return "-".join("".join(secrets.choice(alphabet) for _ in range(4)) for __ in range(4))
+
+def get_or_create_pro_license(buyer_email: str) -> str:
+    row = query_one(
+        "SELECT license_key FROM licenses WHERE buyer_email=:em AND tier='pro' AND (revoked=0 OR revoked IS NULL) ORDER BY issued_at DESC LIMIT 1",
+        {"em": buyer_email},
+    )
+    if row and row.get("license_key"):
+        return row["license_key"]
+    key = _make_license_key()
+    execute(
+        "INSERT INTO licenses (license_key, buyer_email, tier) VALUES (:key, :em, 'pro')",
+        {"key": key, "em": buyer_email},
+    )
+    return key
+
+def revoke_licenses_for_email(buyer_email: str):
+    execute(
+        "UPDATE licenses SET revoked=1 WHERE buyer_email=:em AND tier='pro' AND (revoked=0 OR revoked IS NULL)",
+        {"em": buyer_email},
+    )
+
+def send_license_email_plain(to_email: str, license_key: str):
+    body = f"""Thanks for supporting Glass!
+
+You're now Pro (unlimited windows).
+
+Your license key:
+{license_key}
+
+Activate on your PC:
+1) Open Glass
+2) Enter License → paste the key
+3) Click Refresh License (if needed)
+
+Download: {os.getenv("DOMAIN","https://glassapp.me")}/download/windows
+Policy: Digital license, delivered immediately. All sales are final. If a payment is reversed/charged back, the license will be revoked.
+
+– Glass
+"""
+    send_mail(to_email, "Your Glass Pro license", body)
 
 # ---- Helpers
 def _bad(msg: str, code: int = 400) -> HTTPException:
@@ -84,8 +128,8 @@ def _int(x) -> int:
     except Exception:
         return 0
 
-def _already(sale_id: str) -> bool:
-    return bool(query_one("SELECT sale_id FROM gumroad_sales WHERE sale_id=:s", {"s": sale_id}))
+def _get_sale(sale_id: str) -> Optional[Dict[str, Any]]:
+    return query_one("SELECT sale_id, refunded, buyer_email FROM gumroad_sales WHERE sale_id=:s", {"s": sale_id})
 
 def _upgrade_link() -> Optional[str]:
     if not ADMIN_SECRET or not sign_action:
@@ -101,16 +145,14 @@ def _verify_hmac(raw_body: bytes, headers: Dict[str, str]) -> bool:
     if not recv:
         return False
     mac = hmac.new(WEBHOOK_SECRET.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
-    # constant-time compare
     return hmac.compare_digest(mac, recv)
 
 def _sanitize_payload(p: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize fields and basic allow-listing."""
-    # accept buyer_email as alias for email
+    # accept buyer_email alias
     if "email" not in p and "buyer_email" in p:
         p["email"] = p.get("buyer_email")
 
-    # Must have these
+    # must-have fields
     for k in ("sale_id", "seller_id", "product_id", "email"):
         if not p.get(k):
             raise _bad(f"Missing field: {k}")
@@ -129,7 +171,7 @@ def _sanitize_payload(p: Dict[str, Any]) -> Dict[str, Any]:
     return p
 
 async def _verify_license_if_present(p: Dict[str, Any]) -> bool:
-    """Optional license verification — skipped if no key or httpx missing or SKIP_VALIDATION true."""
+    """Optional Gumroad license verification — skipped if no key/httpx or SKIP_VALIDATION true."""
     if SKIP_VALIDATION:
         return True
     key = p.get("license_key")
@@ -224,16 +266,17 @@ async def gumroad_webhook(request: Request):
         raise exc
 
     sid = payload["sale_id"]
+    buyer_email = payload.get("email") or ""
+    is_refund = 1 if str(payload.get("refunded")).lower() == "true" else 0
 
-    # Idempotency
-    if _already(sid):
-        return JSONResponse({"ok": True, "duplicate": True})
-
-    # Optional license verify
+    # Optional license verify (Gumroad's own license system, if used)
     if not await _verify_license_if_present(payload):
         raise _bad("License verification failed")
 
-    # Store or dry-run
+    # Fetch previous sale state (if any)
+    prev = _get_sale(sid)
+
+    # Store/UPSERT (always) unless dry-run
     if not DRY_RUN:
         try:
             _store(payload)
@@ -245,27 +288,28 @@ async def gumroad_webhook(request: Request):
     else:
         print("DRY_RUN: skipping DB write")
 
-    # Optional email (best-effort)
-    if send_license_email:
-        try:
-            product = payload.get("product_name") or "Glass"
-            lines = [f"Thanks for purchasing {product}!"]
-            if payload.get("license_key"):
-                lines.append(f"Your license key: {payload['license_key']}")
-            link = _upgrade_link()
-            if link:
-                lines.append("Activate Pro: " + link)
-                lines.append("Open this on the same computer that runs Glass to attach your HWID.")
-            body = "\n\n".join(lines)
-            res = send_license_email(
-                to_email=payload.get("email"),
-                product_name=product,
-                license_key=payload.get("license_key") or "",
-                extra_message=body,
-            )
-            if hasattr(res, "__await__"):
-                await res
-        except Exception as e:
-            print("MAIL_ERROR:", repr(e))
+    # Actions:
+    # - First-time paid (no prev and not refund): create license + email
+    # - Refund/chargeback (is_refund=1): revoke licenses for buyer
+    try:
+        if is_refund:
+            if buyer_email:
+                revoke_licenses_for_email(buyer_email)
+        else:
+            if prev is None and buyer_email:
+                key = get_or_create_pro_license(buyer_email)
+                try:
+                    send_license_email_plain(buyer_email, key)
+                except Exception:
+                    pass  # don't fail webhook on email hiccups
+    except Exception as e:
+        print("LICENSE_FLOW_ERROR:", repr(e))
+
+    # Optional: additional email via upgrade link (kept if you use that flow)
+    # link = _upgrade_link()
+    # if link and buyer_email and not is_refund and prev is None:
+    #     try:
+    #         send_mail(buyer_email, "Activate Glass Pro", f"Open this link on the PC running Glass:\n{link}")
+    #     except Exception: pass
 
     return JSONResponse({"ok": True})
