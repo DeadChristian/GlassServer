@@ -9,11 +9,10 @@ from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi import APIRouter
 
-from ratelimit import RateLimiter
 from referral_endpoints import router as ref_router
 from webhooks_gumroad import router as gumroad_router, ensure_tables
 
-# Optional: Stripe & LemonSqueezy routers (fallback to empty if files not present)
+# Optional: Stripe & LemonSqueezy (safe fallbacks if files aren’t present)
 try:
     from webhooks_stripe import router as stripe_router
 except Exception:
@@ -25,11 +24,11 @@ except Exception:
 
 from db import query_all, execute
 
-# Robust mail import (stub if missing)
+# Robust mail import (stub if missing so app never crashes)
 try:
     from mailer import send_mail
 except Exception:
-    def send_mail(to, subject, body):
+    def send_mail(to: str, subject: str, body: str) -> None:
         print(f"[MAILER-STUB] to={to!r} subject={subject!r}\n{body}")
 
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
@@ -38,7 +37,7 @@ WEB_DIR = Path(__file__).parent / "web"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ensure DB tables exist before serving requests (SQLite or Postgres)
+    # Ensure tables exist
     try:
         ensure_tables()
     except Exception:
@@ -53,7 +52,7 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
 
-    yield  # add shutdown cleanup here if needed
+    yield  # (add shutdown cleanup here if needed)
 
 
 app = FastAPI(
@@ -69,9 +68,6 @@ try:
     print("[BOOT] RateLimiter enabled")
 except Exception as e:
     print("[BOOT] RateLimiter not enabled:", repr(e))
-
-# Global IP-based rate limiter (10 req / 10s)
-app.add_middleware(RateLimiter, limit=10, window_seconds=10)
 
 # Core API: referrals/verify/download
 app.include_router(ref_router)
@@ -103,7 +99,7 @@ def version():
 def public_config(response: Response):
     response.headers["Cache-Control"] = "no-store"
     def on(name, default="0"):
-        return os.getenv(name, default).lower() in ("1","true","yes","on")
+        return os.getenv(name, default).lower() in ("1", "true", "yes", "on")
     return {
         "app": "glass",
         "pro_sales_enabled": on("PRO_SALES_ENABLED", "0"),
