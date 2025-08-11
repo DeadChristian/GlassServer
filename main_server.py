@@ -1,84 +1,51 @@
-# main_server.py — Glass Licensing API (Python 3.9+)
-# - Loads .env (DOMAIN, ADMIN_SECRET, GUMROAD_* vars)
-# - CORS relaxed for dev (tighten allow_origins in prod)
-# - Global rate-limit hook (uses your ratelimit.py stubs)
-# - Health check + simple root
-# - Mounts Gumroad webhook at /webhooks/gumroad
-
 import os
-from typing import List
-
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
-# ---- Load env ---------------------------------------------------------------
+# Load .env variables
 load_dotenv()
 
-DOMAIN = os.getenv("DOMAIN", "http://localhost:8000")
+app = FastAPI()
 
-# Optional CORS origins from env: "https://app.yourdomain.com,https://glassapp.me"
-_allowed: List[str] = [
-    o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()
-]
-
-# ---- App --------------------------------------------------------------------
-app = FastAPI(title="Glass Licensing API", version="1.0.0")
-
-# ---- CORS (relaxed for dev; tighten in prod) --------------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_allowed or ["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ---- Global rate limit middleware (your ratelimit.py) -----------------------
-try:
-    from ratelimit import global_rate_limit
-except Exception:
-    async def global_rate_limit(request: Request):
-        return  # noop if stub missing
-
-@app.middleware("http")
-async def _rl_middleware(request: Request, call_next):
-    await global_rate_limit(request)
-    return await call_next(request)
-
-# ---- Routes -----------------------------------------------------------------
-@app.get("/")
-async def root():
-    return {"ok": True, "service": "Glass Licensing API", "domain": DOMAIN}
-
+# Health check
 @app.get("/healthz")
-async def health():
+async def health_check():
+    return {"status": "ok"}
+
+# Example: return env variables (do NOT expose secrets in production!)
+@app.get("/config")
+async def get_config():
+    return {
+        "DOMAIN": os.getenv("DOMAIN"),
+        "ADMIN_SECRET": os.getenv("ADMIN_SECRET"),
+        "GUMROAD_SELLER_ID": os.getenv("GUMROAD_SELLER_ID"),
+        "GUMROAD_PRODUCT_IDS": os.getenv("GUMROAD_PRODUCT_IDS"),
+        "GUMROAD_PRODUCT_PERMALINKS": os.getenv("GUMROAD_PRODUCT_PERMALINKS"),
+        "SKIP_GUMROAD_VALIDATION": os.getenv("SKIP_GUMROAD_VALIDATION")
+    }
+
+# Gumroad webhook endpoint
+@app.post("/webhooks/gumroad")
+async def gumroad_webhook(request: Request):
+    form_data = await request.form()
+    sale_id = form_data.get("sale_id")
+    seller_id = form_data.get("seller_id")
+    product_id = form_data.get("product_id")
+    email = form_data.get("email")
+
+    expected_seller_id = os.getenv("GUMROAD_SELLER_ID")
+    expected_product_ids = os.getenv("GUMROAD_PRODUCT_IDS", "").split(",")
+
+    # Validate
+    if os.getenv("SKIP_GUMROAD_VALIDATION", "false").lower() != "true":
+        if seller_id != expected_seller_id or product_id not in expected_product_ids:
+            return JSONResponse(content={"detail": "Invalid Gumroad ping"}, status_code=400)
+
+    print(f"✅ Payment received from {email} for product {product_id} (sale: {sale_id})")
+
     return {"ok": True}
 
-# ---- Safe include for webhooks ----------------------------------------------
-def _safe_include(module_name: str, prefix: str = "/webhooks"):
-    """
-    Import a module that exposes `router` and include it under `prefix`.
-    Won't crash the app if the file is missing or has an error; prints why.
-    """
-    try:
-        module = __import__(module_name, fromlist=["router"])
-        router = getattr(module, "router")
-        app.include_router(router, prefix=prefix)
-        print(f"[mount] Mounted {module_name} at {prefix}")
-    except Exception as e:
-        print(f"[mount] Skipped {module_name}: {e}")
-
-# Mount ONLY Gumroad (no Stripe)
-_safe_include("webhooks_gumroad", prefix="/webhooks")
-
-# (Optional) If you later add Lemon Squeezy, uncomment:
-# _safe_include("webhooks_lemonsqueezy", prefix="/webhooks")
-
-# ---- Startup log ------------------------------------------------------------
-@app.on_event("startup")
-async def _on_startup():
-    print("=== Glass Licensing API ===")
-    print(f"DOMAIN={DOMAIN}")
-    print("Webhooks mounted at /webhooks/*")
-    print("===========================")
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))

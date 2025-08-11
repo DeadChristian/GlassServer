@@ -1,36 +1,30 @@
-import os, sqlite3
-from typing import Any, Dict, List, Optional
+import os
+import sqlite3
+import threading
+from typing import Optional, Dict, Any
 
-DB_PATH = os.getenv("DB_PATH", "glass.db")
+DB_PATH = os.getenv("DB_PATH", "/tmp/glass.db")
 
-def _conn():
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    return c
+_lock = threading.Lock()
+_conn_singleton: Optional[sqlite3.Connection] = None
 
-def execute(sql: str, params: Optional[Dict[str, Any]] = None) -> None:
-    conn = _conn()
-    try:
-        conn.execute("PRAGMA foreign_keys = ON;")
-        conn.execute(sql, params or {})
+def _get_conn() -> sqlite3.Connection:
+    global _conn_singleton
+    if _conn_singleton is None:
+        _conn_singleton = sqlite3.connect(DB_PATH, check_same_thread=False)
+        _conn_singleton.row_factory = sqlite3.Row
+    return _conn_singleton
+
+def execute(sql: str, params: Optional[Dict[str, Any]] = None) -> int:
+    with _lock:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute(sql, params or {})
         conn.commit()
-    finally:
-        conn.close()
+        return cur.rowcount
 
 def query_one(sql: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    conn = _conn()
-    try:
-        cur = conn.execute(sql, params or {})
-        row = cur.fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
-
-def query_all(sql: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    conn = _conn()
-    try:
-        cur = conn.execute(sql, params or {})
-        rows = cur.fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    cur = _get_conn().cursor()
+    cur.execute(sql, params or {})
+    row = cur.fetchone()
+    return dict(row) if row else None
