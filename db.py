@@ -1,30 +1,41 @@
+# db.py — Postgres in prod, SQLite in dev
 import os
-import sqlite3
-import threading
 from typing import Optional, Dict, Any
 
-DB_PATH = os.getenv("DB_PATH", "/tmp/glass.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-_lock = threading.Lock()
-_conn_singleton: Optional[sqlite3.Connection] = None
+if DATABASE_URL:
+    import psycopg  # psycopg3
 
-def _get_conn() -> sqlite3.Connection:
-    global _conn_singleton
-    if _conn_singleton is None:
-        _conn_singleton = sqlite3.connect(DB_PATH, check_same_thread=False)
-        _conn_singleton.row_factory = sqlite3.Row
-    return _conn_singleton
+    def _conn():
+        return psycopg.connect(DATABASE_URL, autocommit=True)
 
-def execute(sql: str, params: Optional[Dict[str, Any]] = None) -> int:
-    with _lock:
-        conn = _get_conn()
-        cur = conn.cursor()
-        cur.execute(sql, params or {})
-        conn.commit()
-        return cur.rowcount
+    def execute(sql: str, params: Optional[Dict[str, Any]] = None):
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params or {})
 
-def query_one(sql: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    cur = _get_conn().cursor()
-    cur.execute(sql, params or {})
-    row = cur.fetchone()
-    return dict(row) if row else None
+    def query_one(sql: str, params: Optional[Dict[str, Any]] = None):
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params or {})
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                return dict(zip(cols, row))
+else:
+    import sqlite3
+    DB_PATH = os.getenv("DB_PATH", "/tmp/glass.db")
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    _sqlite = sqlite3.connect(DB_PATH, check_same_thread=False)
+    _sqlite.row_factory = sqlite3.Row
+
+    def execute(sql: str, params: Optional[Dict[str, Any]] = None):
+        with _sqlite:
+            _sqlite.execute(sql, params or {})
+
+    def query_one(sql: str, params: Optional[Dict[str, Any]] = None):
+        cur = _sqlite.execute(sql, params or {})
+        row = cur.fetchone()
+        return dict(row) if row else None
