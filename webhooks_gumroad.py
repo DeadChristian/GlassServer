@@ -1,50 +1,38 @@
-# webhooks_gumroad.py — robust Gumroad webhook (idempotent + Postgres/SQLite safe)
+# webhooks_gumroad.py — Gumroad Ping/Webhook handler (idempotent, PG/SQLite safe)
 
-import os
-import json
-import time
-import hmac
-import hashlib
-import secrets, string
+import os, json, time, hmac, hashlib, secrets, string
 from typing import Dict, Any, Optional
+from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Request, HTTPException
 from starlette.responses import JSONResponse
-from urllib.parse import parse_qs
 
-# DB helpers use :name placeholders (db.py adapts for Postgres/SQLite)
 from db import execute, query_one
-from db import get_conn  # only used for rare connection-level ops
 from mailer import send_mail
 
-# Optional httpx for license verification; safe to omit
+# Optional httpx for Gumroad license verification (not required)
 try:
-    import httpx  # pip install httpx
+    import httpx
 except Exception:
     httpx = None  # type: ignore
 
-# Optional action signer (not required for this flow)
-try:
-    from utils import sign_action
-except Exception:
-    sign_action = None  # type: ignore
-
 router = APIRouter()
 
-# ---- Env / flags
-DEBUG = (os.getenv("DEBUG", "false").lower() == "true")
-DRY_RUN = (os.getenv("DRY_RUN", "false").lower() == "true")
-SKIP_VALIDATION = (os.getenv("SKIP_GUMROAD_VALIDATION", "false").lower() == "true")
-WEBHOOK_SECRET = os.getenv("GUMROAD_WEBHOOK_SECRET", "")  # optional HMAC
+# --- Env / flags --------------------------------------------------------------
+DEBUG = os.getenv("DEBUG", "false").lower() in ("1","true","yes","on")
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1","true","yes","on")
+SKIP_VALIDATION = os.getenv("SKIP_GUMROAD_VALIDATION", "false").lower() in ("1","true","yes","on")
 
+WEBHOOK_SECRET = os.getenv("GUMROAD_WEBHOOK_SECRET", "")  # empty when using Ping UI
 EXPECTED_SELLER_ID = (os.getenv("GUMROAD_SELLER_ID") or "").strip()
-ALLOWED_PRODUCT_IDS = {p.strip() for p in (os.getenv("GUMROAD_PRODUCT_IDS") or "").split(",") if p.strip()}
-ALLOWED_PRODUCT_PERMALINKS = {p.strip() for p in (os.getenv("GUMROAD_PRODUCT_PERMALINKS") or "").split(",") if p.strip()}
 
-DOMAIN = os.getenv("DOMAIN", "http://localhost:8000")
+ALLOWED_PRODUCT_IDS = {p.strip() for p in (os.getenv("GUMROAD_PRODUCT_IDS") or "").split(",") if p.strip()}
+ALLOWED_PERMALINKS = {p.strip() for p in (os.getenv("GUMROAD_PRODUCT_PERMALINKS") or "").split(",") if p.strip()}
+
+DOMAIN = os.getenv("DOMAIN", "https://glassapp.me")
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
 
-# ---- Table creation (Postgres + SQLite)
+# --- Table bootstrap ----------------------------------------------------------
 def ensure_tables():
     ddl = """
     CREATE TABLE IF NOT EXISTS gumroad_sales (
@@ -63,17 +51,16 @@ def ensure_tables():
         sale_timestamp TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         raw_json TEXT
-    )
+    );
     """
-    # retry a bit on boot race conditions
-    for _ in range(20):
+    for _ in range(10):
         try:
             execute(ddl); return
         except Exception as e:
-            print("DDL_RETRY:", repr(e)); time.sleep(1)
+            if DEBUG: print("DDL_RETRY", repr(e))
+            time.sleep(0.5)
 
-# ---- License helpers (DB-agnostic via execute/query_one)
-
+# --- License helpers ----------------------------------------------------------
 def _make_license_key():
     alphabet = string.ascii_uppercase + string.digits
     return "-".join("".join(secrets.choice(alphabet) for _ in range(4)) for __ in range(4))
@@ -86,17 +73,11 @@ def get_or_create_pro_license(buyer_email: str) -> str:
     if row and row.get("license_key"):
         return row["license_key"]
     key = _make_license_key()
-    execute(
-        "INSERT INTO licenses (license_key, buyer_email, tier) VALUES (:key, :em, 'pro')",
-        {"key": key, "em": buyer_email},
-    )
+    execute("INSERT INTO licenses (license_key, buyer_email, tier) VALUES (:k, :em, 'pro')", {"k": key, "em": buyer_email})
     return key
 
 def revoke_licenses_for_email(buyer_email: str):
-    execute(
-        "UPDATE licenses SET revoked=1 WHERE buyer_email=:em AND tier='pro' AND (revoked=0 OR revoked IS NULL)",
-        {"em": buyer_email},
-    )
+    execute("UPDATE licenses SET revoked=1 WHERE buyer_email=:em AND tier='pro' AND (revoked=0 OR revoked IS NULL)", {"em": buyer_email})
 
 def send_license_email_plain(to_email: str, license_key: str):
     body = f"""Thanks for supporting Glass!
@@ -109,88 +90,58 @@ Your license key:
 Activate on your PC:
 1) Open Glass
 2) Enter License → paste the key
-3) Click Refresh License (if needed)
+3) If needed, click Refresh License
 
-Download: {os.getenv("DOMAIN","https://glassapp.me")}/download/windows
-Policy: Digital license, delivered immediately. All sales are final. If a payment is reversed/charged back, the license will be revoked.
+Download: {DOMAIN}/download/windows
+Policy: Digital license, delivered immediately. All sales are final. Chargebacks revoke the license.
 
 – Glass
 """
     send_mail(to_email, "Your Glass Pro license", body)
 
-# ---- Helpers
-def _bad(msg: str, code: int = 400) -> HTTPException:
-    return HTTPException(status_code=code, detail=msg)
+# --- Helpers ------------------------------------------------------------------
+def _http_400(msg: str) -> HTTPException:
+    return HTTPException(status_code=400, detail=msg)
 
-def _int(x) -> int:
-    try:
-        return int(x) if x is not None else 0
-    except Exception:
-        return 0
+def _as_int(x) -> int:
+    try: return int(x) if x is not None else 0
+    except Exception: return 0
 
 def _get_sale(sale_id: str) -> Optional[Dict[str, Any]]:
     return query_one("SELECT sale_id, refunded, buyer_email FROM gumroad_sales WHERE sale_id=:s", {"s": sale_id})
 
-def _upgrade_link() -> Optional[str]:
-    if not ADMIN_SECRET or not sign_action:
-        return None
-    tok = sign_action(ADMIN_SECRET, "pro-upgrade")
-    return f"{DOMAIN}/admin/upgrade-to-pro?token={tok}"
-
-def _verify_hmac(raw_body: bytes, headers: Dict[str, str]) -> bool:
-    """Verify Gumroad HMAC (if WEBHOOK_SECRET is set). Gumroad has used X-Signature or X-Gumroad-Signature."""
+def _verify_hmac(raw_body: bytes, headers: Dict[str,str]) -> bool:
     if not WEBHOOK_SECRET:
-        return True
+        return True  # Ping mode: Gumroad doesn't send a signature
     recv = headers.get("x-gumroad-signature") or headers.get("x-signature") or ""
     if not recv:
         return False
     mac = hmac.new(WEBHOOK_SECRET.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(mac, recv)
 
-def _sanitize_payload(p: Dict[str, Any]) -> Dict[str, Any]:
-    # accept buyer_email alias
-    if "email" not in p and "buyer_email" in p:
-        p["email"] = p.get("buyer_email")
+def _allowlists_ok(p: Dict[str, Any]) -> None:
+    # seller check (if configured)
+    if EXPECTED_SELLER_ID and p.get("seller_id") != EXPECTED_SELLER_ID:
+        raise _http_400("Unknown seller_id")
 
-    # must-have fields
-    for k in ("sale_id", "seller_id", "product_id", "email"):
-        if not p.get(k):
-            raise _bad(f"Missing field: {k}")
+    pid = (p.get("product_id") or "").strip()
+    plink = (p.get("product_permalink") or "").strip()
 
-    if EXPECTED_SELLER_ID and p["seller_id"] != EXPECTED_SELLER_ID:
-        raise _bad("Unknown seller_id")
+    # accept if any configured allow-list matches
+    ok = False
+    if ALLOWED_PRODUCT_IDS:
+        ok = ok or (pid and pid in ALLOWED_PRODUCT_IDS)
+    if ALLOWED_PERMALINKS:
+        ok = ok or (plink and plink in ALLOWED_PERMALINKS)
 
-    if ALLOWED_PRODUCT_IDS and p["product_id"] not in ALLOWED_PRODUCT_IDS:
-        raise _bad("Unknown product_id")
-
-    if ALLOWED_PRODUCT_PERMALINKS:
-        pp = p.get("product_permalink")
-        if pp and pp not in ALLOWED_PRODUCT_PERMALINKS:
-            raise _bad("Unknown product_permalink")
-
-    return p
-
-async def _verify_license_if_present(p: Dict[str, Any]) -> bool:
-    """Optional Gumroad license verification — skipped if no key/httpx or SKIP_VALIDATION true."""
-    if SKIP_VALIDATION:
-        return True
-    key = p.get("license_key")
-    if not key or httpx is None:
-        return True
-    data: Dict[str, Any] = {"license_key": key}
-    if p.get("product_permalink"):
-        data["product_permalink"] = p["product_permalink"]
-    elif p.get("product_id"):
-        data["product_id"] = p["product_id"]
-    else:
-        return False
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post("https://api.gumroad.com/v2/licenses/verify", data=data)
-        return r.status_code == 200 and bool(r.json().get("success"))
-    except Exception:
-        # network hiccup: accept instead of 500ing the webhook
-        return True
+    if (ALLOWED_PRODUCT_IDS or ALLOWED_PERMALINKS) and not ok:
+        # pick the most helpful message
+        if ALLOWED_PRODUCT_IDS and pid and pid not in ALLOWED_PRODUCT_IDS:
+            raise _http_400("Unknown product_id")
+        if ALLOWED_PERMALINKS and plink and plink not in ALLOWED_PERMALINKS:
+            raise _http_400("Unknown product_permalink")
+        # neither provided
+        raise _http_400("Missing product_id/product_permalink")
 
 def _store(p: Dict[str, Any]) -> None:
     row = {
@@ -199,12 +150,12 @@ def _store(p: Dict[str, Any]) -> None:
         "product_id": p.get("product_id"),
         "product_name": p.get("product_name"),
         "product_permalink": p.get("product_permalink"),
-        "buyer_email": p.get("email"),
+        "buyer_email": p.get("email") or p.get("buyer_email"),
         "full_name": p.get("full_name"),
-        "price_cents": _int(p.get("price")),
-        "quantity": _int(p.get("quantity") or "1"),
+        "price_cents": _as_int(p.get("price")),
+        "quantity": _as_int(p.get("quantity") or "1"),
         "license_key": p.get("license_key"),
-        "refunded": 1 if str(p.get("refunded")).lower() == "true" else 0,
+        "refunded": 1 if str(p.get("refunded")).lower() in ("1","true","yes") else 0,
         "subscription_id": p.get("subscription_id"),
         "sale_timestamp": p.get("sale_timestamp"),
         "raw_json": json.dumps(p, separators=(",", ":"), ensure_ascii=False),
@@ -235,81 +186,97 @@ def _store(p: Dict[str, Any]) -> None:
       raw_json=excluded.raw_json
     """, row)
 
-# ---- Routes
+# --- Routes -------------------------------------------------------------------
 @router.get("/gumroad")
 async def gumroad_alive():
-    return {"ok": True, "use": "POST /webhooks/gumroad or /gumroad"}
+    return {"ok": True, "use": "POST /payments/gumroad (or /gumroad)"}
 
 @router.post("/gumroad")
 async def gumroad_webhook(request: Request):
-    # read raw body once (for HMAC + parsing)
     raw = await request.body()
 
-    # Verify HMAC if secret is set
+    # HMAC only if secret set (Ping UI has no secret)
     if not _verify_hmac(raw, {k.lower(): v for k, v in request.headers.items()}):
-        raise _bad("Invalid signature", 401)
+        raise HTTPException(status_code=401, detail="Invalid signature")
 
-    # Parse payload (prefer raw urlencoded because we already have it)
+    # Parse payload (prefer raw x-www-form-urlencoded; fallback to multipart)
     payload: Dict[str, Any] = {}
     if raw:
-        qs = parse_qs(raw.decode("utf-8", errors="ignore"), keep_blank_values=True)
-        payload = {k: v[0] for k, v in qs.items()}
+        try:
+            qs = parse_qs(raw.decode("utf-8", errors="ignore"), keep_blank_values=True)
+            payload = {k: v[0] for k, v in qs.items()}
+        except Exception:
+            payload = {}
     if not payload:
-        # fallback to Starlette Form parser (multipart/form-data)
         form = await request.form()
         payload = {k: v for k, v in form.items()}
 
-    # Normalize + sanity checks
-    try:
-        payload = _sanitize_payload(payload)
-    except HTTPException as exc:
-        raise exc
+    if DEBUG:
+        print("GUMROAD_KEYS", list(payload.keys()))
+        preview = {k: payload.get(k) for k in ("sale_id","seller_id","product_id","product_permalink","email","refunded")}
+        print("GUMROAD_PREVIEW", preview)
 
-    sid = payload["sale_id"]
-    buyer_email = payload.get("email") or ""
-    is_refund = 1 if str(payload.get("refunded")).lower() == "true" else 0
+    # Accept Gumroad "Send test ping" (no DB writes)
+    if payload.get("test") == "true" or payload.get("action") == "test" or "test" in payload:
+        return JSONResponse({"ok": True, "test": True})
 
-    # Optional license verify (Gumroad's own license system, if used)
-    if not await _verify_license_if_present(payload):
-        raise _bad("License verification failed")
+    # Minimal required fields for real events
+    sale_id = payload.get("sale_id")
+    email = payload.get("email") or payload.get("buyer_email")
+    if not sale_id or not email:
+        if DEBUG: print("GUMROAD_MISSING_CORE_FIELDS", {"sale_id": sale_id, "email": email})
+        # return 200 so Gumroad doesn't keep retrying pings with minimal data
+        return JSONResponse({"ok": True, "ignored": True})
 
-    # Fetch previous sale state (if any)
-    prev = _get_sale(sid)
+    # Allow-lists (seller + product id/permalink)
+    _allowlists_ok(payload)
 
-    # Store/UPSERT (always) unless dry-run
+    # Optional Gumroad license verify (if you use Gumroad licensing)
+    if not await _maybe_verify_license(payload):
+        raise _http_400("License verification failed")
+
+    # Idempotent upsert
     if not DRY_RUN:
         try:
             _store(payload)
         except Exception as e:
-            print("STORE_ERROR:", repr(e))
-            if DEBUG:
-                return JSONResponse({"ok": False, "error": "store_failed", "why": str(e)}, status_code=500)
-            raise HTTPException(status_code=500, detail="internal")
-    else:
-        print("DRY_RUN: skipping DB write")
+            if DEBUG: print("STORE_ERROR", repr(e))
+            raise HTTPException(status_code=500, detail="store_failed")
 
-    # Actions:
-    # - First-time paid (no prev and not refund): create license + email
-    # - Refund/chargeback (is_refund=1): revoke licenses for buyer
+    # Post actions
+    is_refund = str(payload.get("refunded")).lower() in ("1","true","yes")
     try:
         if is_refund:
-            if buyer_email:
-                revoke_licenses_for_email(buyer_email)
+            revoke_licenses_for_email(email)
         else:
-            if prev is None and buyer_email:
-                key = get_or_create_pro_license(buyer_email)
+            if _get_sale(sale_id) is None:
+                key = get_or_create_pro_license(email)
                 try:
-                    send_license_email_plain(buyer_email, key)
+                    send_license_email_plain(email, key)
                 except Exception:
-                    pass  # don't fail webhook on email hiccups
+                    pass
     except Exception as e:
-        print("LICENSE_FLOW_ERROR:", repr(e))
-
-    # Optional: additional email via upgrade link (kept if you use that flow)
-    # link = _upgrade_link()
-    # if link and buyer_email and not is_refund and prev is None:
-    #     try:
-    #         send_mail(buyer_email, "Activate Glass Pro", f"Open this link on the PC running Glass:\n{link}")
-    #     except Exception: pass
+        if DEBUG: print("LICENSE_FLOW_ERROR", repr(e))
 
     return JSONResponse({"ok": True})
+
+# --- Optional license verification --------------------------------------------
+async def _maybe_verify_license(p: Dict[str, Any]) -> bool:
+    if SKIP_VALIDATION or httpx is None:
+        return True
+    key = p.get("license_key")
+    if not key:
+        return True
+    data: Dict[str, Any] = {"license_key": key}
+    if p.get("product_permalink"):
+        data["product_permalink"] = p["product_permalink"]
+    elif p.get("product_id"):
+        data["product_id"] = p["product_id"]
+    else:
+        return True
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post("https://api.gumroad.com/v2/licenses/verify", data=data)
+        return r.status_code == 200 and bool(r.json().get("success"))
+    except Exception:
+        return True
