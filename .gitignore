@@ -4,3 +4,9 @@ __pycache__/
 .env
 *.db
 openapi.json
+__pycache__/
+.venv/
+.env
+*.env
+glass.db
+static/GlassSetup.exe
