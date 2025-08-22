@@ -1,10 +1,15 @@
-﻿import os, sqlite3, time, secrets, string
+﻿# main.py — GlassServer (minimal, stable, Docker-friendly)
+# Endpoints: /, /healthz, /public-config, /license/issue, /license/activate, /license/validate, /verify
+import os, sqlite3, time, secrets, string
 from contextlib import closing
 from typing import Optional, Dict, Any
+
 from fastapi import FastAPI, HTTPException, Request, Response, Query
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+# ── Env ──────────────────────────────────────────────────────────────────────
 DOMAIN              = os.getenv("DOMAIN", "").rstrip("/")
 DOWNLOAD_URL_PRO    = os.getenv("DOWNLOAD_URL_PRO", f"{DOMAIN}/static/GlassSetup.exe" if DOMAIN else "")
 ADMIN_SECRET        = os.getenv("ADMIN_SECRET", "")
@@ -16,59 +21,79 @@ PRO_MAX_WINDOWS     = int(os.getenv("PRO_MAX_WINDOWS", "5"))
 
 NOW = lambda: int(time.time())
 
+# ── App ──────────────────────────────────────────────────────────────────────
 app = FastAPI(title="GlassServer", version=os.getenv("APP_VERSION", "1.0.0"))
+
+# permissive CORS (desktop client requests)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=False,
+    allow_methods=["*"], allow_headers=["*"]
+)
+
+# serve /static if present (e.g., GlassSetup.exe)
 STATIC_DIR = os.path.join(os.getcwd(), "static")
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-def _db():
+# ── DB ───────────────────────────────────────────────────────────────────────
+def _db() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.row_factory = sqlite3.Row
     return con
 
-def _init_db():
+def _init_db() -> None:
     with closing(_db()) as con, con:
-        con.execute("""CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            hwid TEXT UNIQUE NOT NULL,
-            tier TEXT NOT NULL DEFAULT 'free',
-            max_windows INTEGER,
-            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-            updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          hwid        TEXT UNIQUE NOT NULL,
+          tier        TEXT NOT NULL DEFAULT 'free',
+          max_windows INTEGER,
+          created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+          updated_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
         );""")
-        con.execute("""CREATE TRIGGER IF NOT EXISTS users_touch AFTER UPDATE ON users
-        BEGIN UPDATE users SET updated_at=strftime('%s','now') WHERE id=NEW.id; END;""")
-        con.execute("""CREATE TABLE IF NOT EXISTS licenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            license_key TEXT UNIQUE NOT NULL,
-            buyer_email TEXT,
-            tier TEXT NOT NULL DEFAULT 'pro',
-            max_concurrent INTEGER NOT NULL DEFAULT 5,
-            max_activations INTEGER NOT NULL DEFAULT 1,
-            revoked INTEGER NOT NULL DEFAULT 0,
-            issued_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        con.execute("""
+        CREATE TRIGGER IF NOT EXISTS users_touch AFTER UPDATE ON users
+        BEGIN
+          UPDATE users SET updated_at=strftime('%s','now') WHERE id=NEW.id;
+        END;""")
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS licenses (
+          id               INTEGER PRIMARY KEY AUTOINCREMENT,
+          license_key      TEXT UNIQUE NOT NULL,
+          buyer_email      TEXT,
+          tier             TEXT NOT NULL DEFAULT 'pro',
+          max_concurrent   INTEGER NOT NULL DEFAULT 5,
+          max_activations  INTEGER NOT NULL DEFAULT 1,
+          revoked          INTEGER NOT NULL DEFAULT 0,
+          issued_at        INTEGER NOT NULL DEFAULT (strftime('%s','now'))
         );""")
-        con.execute("""CREATE TABLE IF NOT EXISTS license_activations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            license_key TEXT NOT NULL,
-            hwid TEXT NOT NULL,
-            activated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-            UNIQUE(license_key, hwid)
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS license_activations (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          license_key  TEXT NOT NULL,
+          hwid         TEXT NOT NULL,
+          activated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+          UNIQUE(license_key, hwid)
         );""")
-        con.execute("""CREATE TABLE IF NOT EXISTS license_tokens (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            token TEXT UNIQUE NOT NULL,
-            license_key TEXT,
-            hwid TEXT NOT NULL,
-            tier TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            expires_at INTEGER,
-            revoked INTEGER NOT NULL DEFAULT 0
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS license_tokens (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          token       TEXT UNIQUE NOT NULL,
+          license_key TEXT,
+          hwid        TEXT NOT NULL,
+          tier        TEXT NOT NULL,
+          created_at  INTEGER NOT NULL,
+          expires_at  INTEGER,
+          revoked     INTEGER NOT NULL DEFAULT 0
         );""")
         con.execute("CREATE INDEX IF NOT EXISTS idx_tokens_token ON license_tokens(token);")
         con.execute("CREATE INDEX IF NOT EXISTS idx_tokens_hwid  ON license_tokens(hwid);")
+
 _init_db()
 
+# ── Models ───────────────────────────────────────────────────────────────────
 class IssueIn(BaseModel):
     max_concurrent: int = Field(default=5, ge=1, le=50)
     max_activations: int = Field(default=1, ge=1, le=50)
@@ -87,6 +112,7 @@ class ValidateIn(BaseModel):
 class VerifyIn(BaseModel):
     hwid: str = Field(min_length=1)
 
+# ── Helpers ──────────────────────────────────────────────────────────────────
 def _set_user_tier(hwid: str, tier: str, max_windows: Optional[int] = None) -> None:
     with closing(_db()) as con, con:
         row = con.execute("SELECT id FROM users WHERE hwid=?", (hwid,)).fetchone()
@@ -103,7 +129,7 @@ def _make_key(prefix: str = "GL") -> str:
     parts = ["".join(secrets.choice(alphabet) for _ in range(5)) for __ in range(3)]
     return f"{prefix}-" + "-".join(parts)
 
-def _issue_token(con, *, license_key: Optional[str], hwid: str, tier: str) -> str:
+def _issue_token(con: sqlite3.Connection, *, license_key: Optional[str], hwid: str, tier: str) -> str:
     token = secrets.token_urlsafe(32)
     expires_at = NOW() + TOKEN_TTL_DAYS * 86400 if TOKEN_TTL_DAYS > 0 else None
     con.execute(
@@ -112,13 +138,16 @@ def _issue_token(con, *, license_key: Optional[str], hwid: str, tier: str) -> st
     )
     return token
 
-def _validate_token(con, token: str, hwid: str) -> Dict[str, Any]:
+def _validate_token(con: sqlite3.Connection, token: str, hwid: str) -> Dict[str, Any]:
     row = con.execute("SELECT * FROM license_tokens WHERE token=?", (token,)).fetchone()
-    if not row: return {"ok": False, "reason": "unknown_token"}
-    if int(row["revoked"] or 0) == 1: return {"ok": False, "reason": "revoked"}
-    if hwid != row["hwid"]: return {"ok": False, "reason": "hwid_mismatch"}
+    if not row:
+        return {"ok": False, "reason": "unknown_token"}
+    if int(row["revoked"] or 0) == 1:
+        return {"ok": False, "reason": "revoked"}
+    if hwid != row["hwid"]:
+        return {"ok": False, "reason": "hwid_mismatch"}
     exp = row["expires_at"]
-    if exp is not None and isinstance(exp, int) and time.time() > exp:
+    if exp is not None and isinstance(exp, int) and NOW() > exp:
         return {"ok": False, "reason": "expired"}
     return {"ok": True, "tier": str(row["tier"] or "pro").lower()}
 
@@ -127,6 +156,11 @@ def _require_admin(secret_qs: Optional[str], request: Request) -> None:
     bearer = hdr[7:] if hdr.lower().startswith("bearer ") else ""
     if not ADMIN_SECRET or (secret_qs != ADMIN_SECRET and bearer != ADMIN_SECRET):
         raise HTTPException(status_code=403, detail="Forbidden")
+
+# ── Routes ───────────────────────────────────────────────────────────────────
+@app.get("/")
+def root():
+    return {"ok": True, "service": "glass", "docs": "/docs", "health": "/healthz"}
 
 @app.get("/healthz")
 def healthz():
@@ -154,24 +188,35 @@ def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query
     with closing(_db()) as con, con:
         _init_db()
         key = _make_key(body.prefix)
-        con.execute("INSERT INTO licenses (license_key, buyer_email, tier, max_concurrent, max_activations, revoked) VALUES (?,?,?,?,?,0)",
-                    (key, body.email, body.tier.lower(), body.max_concurrent, body.max_activations))
-        return {"ok": True, "key": key, "tier": body.tier.lower(), "max_concurrent": body.max_concurrent, "max_activations": body.max_activations}
+        con.execute(
+            "INSERT INTO licenses (license_key, buyer_email, tier, max_concurrent, max_activations, revoked) VALUES (?,?,?,?,?,0)",
+            (key, body.email, body.tier.lower(), body.max_concurrent, body.max_activations)
+        )
+        return {"ok": True, "key": key, "tier": body.tier.lower(),
+                "max_concurrent": body.max_concurrent, "max_activations": body.max_activations}
 
 @app.post("/license/activate")
 def license_activate(body: ActivateIn):
-    hwid = body.hwid.strip(); key = body.key.strip().upper()
+    hwid = body.hwid.strip()
+    key  = body.key.strip().upper()
     with closing(_db()) as con, con:
         _init_db()
-        if key.startswith("PRO-"):
-            tier = "pro"; _set_user_tier(hwid, tier)
-            token = _issue_token(con, license_key=None, hwid=hwid, tier=tier)
-            return {"ok": True, "tier": tier, "token": token, "max_concurrent": PRO_MAX_WINDOWS, "download_url": DOWNLOAD_URL_PRO}
-        if key.startswith("START"):
-            tier = "starter"; _set_user_tier(hwid, tier)
-            token = _issue_token(con, license_key=None, hwid=hwid, tier=tier)
-            return {"ok": True, "tier": tier, "token": token, "max_concurrent": STARTER_MAX_WINDOWS, "download_url": ""}
 
+        # Legacy fixed prefixes (no DB)
+        if key.startswith("PRO-"):
+            tier = "pro"
+            _set_user_tier(hwid, tier)
+            token = _issue_token(con, license_key=None, hwid=hwid, tier=tier)
+            return {"ok": True, "tier": tier, "token": token,
+                    "max_concurrent": PRO_MAX_WINDOWS, "download_url": DOWNLOAD_URL_PRO}
+        if key.startswith("START"):
+            tier = "starter"
+            _set_user_tier(hwid, tier)
+            token = _issue_token(con, license_key=None, hwid=hwid, tier=tier)
+            return {"ok": True, "tier": tier, "token": token,
+                    "max_concurrent": STARTER_MAX_WINDOWS, "download_url": ""}
+
+        # DB-backed keys
         rec = con.execute("SELECT * FROM licenses WHERE license_key=?", (key,)).fetchone()
         if not rec: raise HTTPException(status_code=400, detail="invalid_key")
         if int(rec["revoked"] or 0) == 1: raise HTTPException(status_code=400, detail="revoked")
@@ -183,23 +228,33 @@ def license_activate(body: ActivateIn):
         con.execute("INSERT OR IGNORE INTO license_activations (license_key, hwid) VALUES (?,?)", (key, hwid))
 
         tier = (rec["tier"] or "pro").lower()
-        cap  = int(rec["max_concurrent"] or (PRO_MAX_WINDOWS if tier=="pro" else STARTER_MAX_WINDOWS if tier=="starter" else FREE_MAX_WINDOWS))
-        trow = con.execute("SELECT token FROM license_tokens WHERE license_key=? AND hwid=? AND revoked=0 ORDER BY created_at DESC LIMIT 1",
-                           (key, hwid)).fetchone()
+        cap  = int(rec["max_concurrent"] or (PRO_MAX_WINDOWS if tier=="pro"
+                                             else STARTER_MAX_WINDOWS if tier=="starter"
+                                             else FREE_MAX_WINDOWS))
+
+        # Reuse token for this HWID if one exists
+        trow = con.execute(
+            "SELECT token FROM license_tokens WHERE license_key=? AND hwid=? AND revoked=0 ORDER BY created_at DESC LIMIT 1",
+            (key, hwid)
+        ).fetchone()
         token = trow["token"] if trow else _issue_token(con, license_key=key, hwid=hwid, tier=tier)
+
         _set_user_tier(hwid, tier)
         return {"ok": True, "tier": tier, "token": token, "max_concurrent": cap,
-                "download_url": DOWNLOAD_URL_PRO if tier=="pro" else ""}
+                "download_url": DOWNLOAD_URL_PRO if tier == "pro" else ""}
 
 @app.post("/license/validate")
 def license_validate(body: ValidateIn):
-    hwid = body.hwid.strip(); tok = body.token.strip()
+    hwid = body.hwid.strip()
+    tok  = body.token.strip()
     with closing(_db()) as con, con:
         res = _validate_token(con, tok, hwid)
         if not res.get("ok"):
             return {"ok": False, "reason": res.get("reason", "invalid")}
-        tier = res["tier"]; _set_user_tier(hwid, tier)
-        return {"ok": True, "tier": tier, "download_url": DOWNLOAD_URL_PRO if tier=="pro" else ""}
+        tier = res["tier"]
+        _set_user_tier(hwid, tier)
+        return {"ok": True, "tier": tier,
+                "download_url": DOWNLOAD_URL_PRO if tier == "pro" else ""}
 
 @app.post("/verify")
 def verify(body: VerifyIn):
@@ -208,7 +263,10 @@ def verify(body: VerifyIn):
         row = con.execute("SELECT tier, max_windows FROM users WHERE hwid=?", (hwid,)).fetchone()
         tier = (row["tier"] if row else "free").lower()
         maxw = row["max_windows"] if (row and row["max_windows"] is not None) else None
-    if maxw is not None: return {"tier": tier, "max_windows": int(maxw)}
-    if tier == "starter": return {"tier":"starter","max_windows":STARTER_MAX_WINDOWS}
-    if tier == "pro":     return {"tier":"pro","max_windows":PRO_MAX_WINDOWS}
-    return {"tier":"free","max_windows":FREE_MAX_WINDOWS}
+    if maxw is not None:
+        return {"tier": tier, "max_windows": int(maxw)}
+    if tier == "starter":
+        return {"tier": "starter", "max_windows": STARTER_MAX_WINDOWS}
+    if tier == "pro":
+        return {"tier": "pro", "max_windows": PRO_MAX_WINDOWS}
+    return {"tier": "free", "max_windows": FREE_MAX_WINDOWS}
