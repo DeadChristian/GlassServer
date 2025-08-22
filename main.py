@@ -270,3 +270,9 @@ def verify(body: VerifyIn):
     if tier == "pro":
         return {"tier": "pro", "max_windows": PRO_MAX_WINDOWS}
     return {"tier": "free", "max_windows": FREE_MAX_WINDOWS}
+
+# ── Run uvicorn from Python (no shell, no $PORT expansion issues) ────────────
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
