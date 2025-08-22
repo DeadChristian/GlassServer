@@ -1,23 +1,31 @@
 ﻿# main.py — GlassServer (minimal, stable, Docker-friendly)
-# Endpoints: /, /healthz, /public-config, /license/issue, /license/activate, /license/validate, /verify
+# Endpoints: /, /healthz, /public-config, /license/issue, /license/activate,
+#            /license/validate, /verify, /buy, /static (mounted), /static-list
 import os, sqlite3, time, secrets, string
 from contextlib import closing
 from typing import Optional, Dict, Any
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 # ── Env ──────────────────────────────────────────────────────────────────────
 DOMAIN              = os.getenv("DOMAIN", "").rstrip("/")
-DOWNLOAD_URL_PRO    = os.getenv("DOWNLOAD_URL_PRO", f"{DOMAIN}/static/GlassSetup.exe" if DOMAIN else "")
+# Where the Pro installer is hosted (default: your /static path on this domain)
+DOWNLOAD_URL_PRO    = os.getenv(
+    "DOWNLOAD_URL_PRO",
+    f"{DOMAIN}/static/GlassSetup.exe" if DOMAIN else ""
+)
 ADMIN_SECRET        = os.getenv("ADMIN_SECRET", "")
 DB_PATH             = os.getenv("DB_PATH", "glass.db")
 TOKEN_TTL_DAYS      = int(os.getenv("TOKEN_TTL_DAYS", "90"))
 FREE_MAX_WINDOWS    = int(os.getenv("FREE_MAX_WINDOWS", "1"))
 STARTER_MAX_WINDOWS = int(os.getenv("STARTER_MAX_WINDOWS", "2"))
 PRO_MAX_WINDOWS     = int(os.getenv("PRO_MAX_WINDOWS", "5"))
+PRO_BUY_URL         = os.getenv("PRO_BUY_URL", "https://gumroad.com/l/xvphp").strip()
 
 NOW = lambda: int(time.time())
 
@@ -28,13 +36,14 @@ app = FastAPI(title="GlassServer", version=os.getenv("APP_VERSION", "1.0.0"))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=False,
-    allow_methods=["*"], allow_headers=["*"]
+    allow_methods=["*"], allow_headers=["*"],
 )
 
-# serve /static if present (e.g., GlassSetup.exe)
-STATIC_DIR = os.path.join(os.getcwd(), "static")
-if os.path.isdir(STATIC_DIR):
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+# --- Static mount (absolute; avoids CWD issues on Railway/Docker) ---
+ROOT = Path(__file__).resolve().parent
+STATIC_DIR = ROOT / "web" / "static"
+STATIC_DIR.mkdir(parents=True, exist_ok=True)  # harmless if exists
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # ── DB ───────────────────────────────────────────────────────────────────────
 def _db() -> sqlite3.Connection:
@@ -126,7 +135,7 @@ def _set_user_tier(hwid: str, tier: str, max_windows: Optional[int] = None) -> N
 
 def _make_key(prefix: str = "GL") -> str:
     alphabet = string.ascii_uppercase + string.digits
-    parts = ["".join(secrets.choice(alphabet) for _ in range(5)) for __ in range(3)]
+    parts = ["".join(serets.choice(alphabet) for _ in range(5)) for __ in range(3)]
     return f"{prefix}-" + "-".join(parts)
 
 def _issue_token(con: sqlite3.Connection, *, license_key: Optional[str], hwid: str, tier: str) -> str:
@@ -176,11 +185,25 @@ def public_config(response: Response):
         "starter_buy_url": os.getenv("STARTER_BUY_URL", "https://gumroad.com/l/kisnxu"),
         "pro_sales_enabled": os.getenv("PRO_SALES_ENABLED", "1") in ("1","true","True"),
         "pro_price": os.getenv("PRO_PRICE", "9.99"),
-        "pro_buy_url": os.getenv("PRO_BUY_URL", "https://gumroad.com/l/xvphp"),
+        "pro_buy_url": PRO_BUY_URL,  # env wins
         "intro_active": os.getenv("INTRO_ACTIVE", "1") in ("1","true","True"),
         "price_intro": os.getenv("PRICE_INTRO", "5"),
         "referrals_enabled": os.getenv("REFERRALS_ENABLED", "1") in ("1","true","True"),
     }
+
+@app.get("/buy")
+def buy_redirect(tier: str = "pro"):
+    # simple 307 → checkout page (env-configurable)
+    return RedirectResponse(url=PRO_BUY_URL, status_code=307)
+
+@app.get("/static-list")
+def static_list():
+    """Debug helper to confirm what the container is serving under /static"""
+    try:
+        files = sorted(p.name for p in STATIC_DIR.iterdir()) if STATIC_DIR.exists() else []
+        return {"root": str(ROOT), "static": str(STATIC_DIR), "exists": STATIC_DIR.exists(), "files": files}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.post("/license/issue")
 def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query(None)):
