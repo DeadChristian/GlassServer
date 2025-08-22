@@ -1,89 +1,252 @@
-# main.py — FastAPI entrypoint for Glass (Railway/Docker friendly)
-
-from contextlib import asynccontextmanager
+﻿# main.py — FastAPI for Glass (desktop licensing + public-config)
+# Endpoints: /public-config, /verify, /license/activate, /license/validate, /license/issue, /ref/create
+from contextlib import closing
 from pathlib import Path
-import os
+import os, sqlite3, hashlib, secrets, string, time
 
-from fastapi import FastAPI, HTTPException, Query, Response
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Response, Request, APIRouter
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi import APIRouter
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
+from dotenv import load_dotenv
 
-from referral_endpoints import router as ref_router
-from webhooks_gumroad import router as gumroad_router, ensure_tables
+# --- Load env ---------------------------------------------------------------
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
-# Optional: Stripe & LemonSqueezy (safe fallbacks if files aren’t present)
+# --- Optional routers (won't crash if missing) ------------------------------
+try:
+    from referral_endpoints import router as ref_router
+except Exception:
+    ref_router = APIRouter()
+
+try:
+    from webhooks_gumroad import router as gumroad_router, ensure_tables as gumroad_ensure_tables
+except Exception:
+    gumroad_router = APIRouter()
+    def gumroad_ensure_tables():
+        pass
+
 try:
     from webhooks_stripe import router as stripe_router
 except Exception:
     stripe_router = APIRouter()
+
 try:
     from webhooks_lemonsqueezy import router as lemon_router
 except Exception:
     lemon_router = APIRouter()
 
-from db import query_all, execute
+# db helpers used by your Gumroad code; safe fallbacks if not present
+try:
+    from db import query_all, execute
+except Exception:
+    def query_all(*args, **kwargs):
+        return []
+    def execute(*args, **kwargs):
+        pass
 
-# Robust mail import (stub if missing so app never crashes)
+# mailer is optional
 try:
     from mailer import send_mail
 except Exception:
     def send_mail(to: str, subject: str, body: str) -> None:
         print(f"[MAILER-STUB] to={to!r} subject={subject!r}\n{body}")
 
-
+# --- Config -----------------------------------------------------------------
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
 WEB_DIR = Path(__file__).parent / "web"
 
+# DB path (absolute so working-directory doesn't matter)
+_DB_ENV = os.getenv("DB_PATH", "glass.db")
+DB_PATH = str(Path(_DB_ENV) if os.path.isabs(_DB_ENV) else (Path(__file__).parent / _DB_ENV))
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Ensure tables exist
-    try:
-        ensure_tables()
-    except Exception:
-        pass
+# Domain + Pro download URL
+DOMAIN = (os.getenv("DOMAIN", "").rstrip("/"))
+DOWNLOAD_URL_PRO = os.getenv("DOWNLOAD_URL_PRO", f"{DOMAIN}/static/GlassSetup.exe" if DOMAIN else "")
 
-    # Startup migration: add licenses.revoked (safe if already exists)
+# Numeric caps (env-overridable)
+PRO_MAX_WINDOWS = int(os.getenv("PRO_MAX_WINDOWS", "5"))
+STARTER_MAX_WINDOWS = int(os.getenv("STARTER_MAX_WINDOWS", "2"))
+FREE_MAX_WINDOWS = int(os.getenv("FREE_MAX_WINDOWS", "1"))
+
+# Token settings
+TOKEN_TTL_DAYS = int(os.getenv("TOKEN_TTL_DAYS", "90"))  # rotate every ~3 months
+NOW = lambda: int(time.time())
+
+# -------------------- tiny users table for desktop tiers --------------------
+
+def _db() -> sqlite3.Connection:
+    con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    con.row_factory = sqlite3.Row
+    return con
+
+def _init_users_table() -> None:
+    with closing(_db()) as con, con:
+        con.execute(
+            """
+        CREATE TABLE IF NOT EXISTS users (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          hwid         TEXT UNIQUE NOT NULL,
+          tier         TEXT NOT NULL DEFAULT 'free',
+          max_windows  INTEGER,
+          created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+        )
+        con.execute(
+            """
+        CREATE TRIGGER IF NOT EXISTS users_touch AFTER UPDATE ON users
+        BEGIN
+          UPDATE users SET updated_at=CURRENT_TIMESTAMP WHERE id=NEW.id;
+        END;
+        """
+        )
+
+def _ensure_user_schema(con: sqlite3.Connection) -> None:
+    cols = {r[1] for r in con.execute("PRAGMA table_info(users)").fetchall()}
+    if "max_windows" not in cols:
+        con.execute("ALTER TABLE users ADD COLUMN max_windows INTEGER")
+
+def _get_or_create_user(hwid: str) -> dict:
     try:
-        execute("ALTER TABLE licenses ADD COLUMN revoked INTEGER DEFAULT 0")
-    except Exception:
+        with closing(_db()) as con, con:
+            try:
+                con.execute("SELECT 1 FROM users LIMIT 1")
+            except sqlite3.OperationalError as e:
+                if "no such table" in str(e).lower():
+                    _init_users_table()
+                else:
+                    raise
+            _ensure_user_schema(con)
+            row = con.execute(
+                "SELECT hwid, tier, max_windows FROM users WHERE hwid=?",
+                (hwid,),
+            ).fetchone()
+            if row:
+                return dict(row)
+            con.execute("INSERT INTO users (hwid, tier) VALUES (?, 'free')", (hwid,))
+            return {"hwid": hwid, "tier": "free", "max_windows": None}
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            _init_users_table()
+            return _get_or_create_user(hwid)
+        raise
+
+def _set_user_tier(hwid: str, tier: str, max_windows: Optional[int] = None) -> None:
+    with closing(_db()) as con, con:
         try:
-            execute("ALTER TABLE licenses ADD COLUMN IF NOT EXISTS revoked INTEGER DEFAULT 0")
-        except Exception:
-            pass
+            con.execute("SELECT 1 FROM users LIMIT 1")
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e).lower():
+                _init_users_table()
+            else:
+                raise
+        _ensure_user_schema(con)
+        row = con.execute("SELECT 1 FROM users WHERE hwid=?", (hwid,)).fetchone()
+        if not row:
+            con.execute("INSERT INTO users (hwid, tier) VALUES (?, 'free')", (hwid,))
+        if max_windows is None:
+            con.execute("UPDATE users SET tier=? WHERE hwid=?", (tier, hwid))
+        else:
+            con.execute("UPDATE users SET tier=?, max_windows=? WHERE hwid=?", (tier, max_windows, hwid))
 
-    yield  # (add shutdown cleanup here if needed)
+# -------------------- license tables (keys + activations + tokens) ----------
 
+def _init_license_tables(con: sqlite3.Connection) -> None:
+    # keys
+    con.execute(
+        """
+    CREATE TABLE IF NOT EXISTS licenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      license_key     TEXT UNIQUE NOT NULL,
+      buyer_email     TEXT,
+      tier            TEXT NOT NULL DEFAULT 'pro',
+      max_concurrent  INTEGER DEFAULT 5,
+      max_activations INTEGER DEFAULT 3,
+      revoked         INTEGER DEFAULT 0,
+      issued_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """
+    )
+    # activations (legacy; we keep for audit)
+    con.execute(
+        """
+    CREATE TABLE IF NOT EXISTS license_activations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      license_key TEXT NOT NULL,
+      hwid        TEXT NOT NULL,
+      activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(license_key, hwid)
+    );
+    """
+    )
+    # tokens (new; what the client uses)
+    con.execute(
+        """
+    CREATE TABLE IF NOT EXISTS license_tokens (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      token       TEXT UNIQUE NOT NULL,
+      license_key TEXT,             -- may be NULL for prefix/admin keys
+      hwid        TEXT NOT NULL,
+      tier        TEXT NOT NULL,
+      created_at  INTEGER NOT NULL,
+      expires_at  INTEGER,
+      revoked     INTEGER NOT NULL DEFAULT 0
+    );
+    """
+    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_tokens_token ON license_tokens(token)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_tokens_hwid  ON license_tokens(hwid)")
 
-app = FastAPI(
-    title="Glass Licensing API",
-    version=os.getenv("APP_VERSION", "1.0.0"),
-    lifespan=lifespan,
+# -------------------- FastAPI app -------------------------------------------
+app = FastAPI(title="Glass Licensing API", version=os.getenv("APP_VERSION", "1.0.0"))
+
+# CORS (if the desktop app calls from a renderer/webview)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[os.getenv("DOMAIN", "*")],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Optional global IP-based rate limiter (skip if package not present)
+# Serve /static and /launch
+STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR.mkdir(exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+WEB_DIR = Path(__file__).parent / "web"
+app.mount("/launch", StaticFiles(directory=str(WEB_DIR), html=True, check_dir=False), name="web")
+
+# Optional global IP rate limit (safe if package missing)
 try:
     from ratelimit import RateLimiter  # type: ignore
     app.add_middleware(RateLimiter, limit=10, window_seconds=10)
-    print("[BOOT] RateLimiter enabled")
-except Exception as e:
-    print("[BOOT] RateLimiter not enabled:", repr(e))
+except Exception:
+    pass
 
+@app.on_event("startup")
+def _startup():
+    try:
+        gumroad_ensure_tables()
+    except Exception:
+        pass
+    try:
+        _init_users_table()
+    except Exception:
+        pass
+    try:
+        with closing(_db()) as con, con:
+            _init_license_tables(con)
+    except Exception:
+        pass
 
-# Core API: referrals/verify/download
+# Core API: referrals (if present)
 app.include_router(ref_router)
 
-# Static site mounted at /launch (place index.html, styles.css, etc. in ./web/)
-app.mount(
-    "/launch",
-    StaticFiles(directory=str(WEB_DIR), html=True, check_dir=False),
-    name="web",
-)
-
-
-# -------------------- Core utility routes --------------------
-
+# -------------------- Utility routes ----------------------------------------
 @app.get("/")
 def root():
     return {"ok": True, "service": "glass", "docs": "/docs", "health": "/healthz"}
@@ -94,27 +257,228 @@ def healthz():
 
 @app.get("/version")
 def version():
-    return {
-        "ok": True,
-        "app": "glass",
-        "version": os.getenv("APP_VERSION", "0.0.0"),
-        "git": os.getenv("GIT_SHA", "unknown"),
-    }
+    return {"ok": True, "app": "glass", "version": os.getenv("APP_VERSION", "0.0.0"), "git": os.getenv("GIT_SHA", "unknown")}
+
+def _env_on(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
 
 @app.get("/public-config")
 def public_config(response: Response):
     response.headers["Cache-Control"] = "no-store"
-    def on(name, default="0"):
-        return os.getenv(name, default).lower() in ("1", "true", "yes", "on")
+    starter_enabled = _env_on("STARTER_SALES_ENABLED", "1")
+    starter_price = os.getenv("STARTER_PRICE", "5")
+    starter_buy = os.getenv("STARTER_BUY_URL")
+    pro_enabled = _env_on("PRO_SALES_ENABLED", "1")
+    pro_price = os.getenv("PRO_PRICE") or os.getenv("price") or "9.99"
+    pro_buy = os.getenv("PRO_BUY_URL") or os.getenv("BUY_URL") or "https://www.glassapp.me/buy?tier=pro"
+    intro_active = _env_on("INTRO_ACTIVE", "1")
+    price_intro = os.getenv("PRICE_INTRO", "5")
+    referrals_on = _env_on("REFERRALS_ENABLED", "1")
+    if not starter_enabled and not os.getenv("STARTER_BUY_URL"):
+        if os.getenv("BUY_URL") and not pro_enabled:
+            starter_enabled = True
+            starter_buy = os.getenv("BUY_URL")
+            starter_price = os.getenv("STARTER_PRICE", "5")
     return {
         "app": "glass",
-        "pro_sales_enabled": on("PRO_SALES_ENABLED", "0"),
-        "buy_url": os.getenv("BUY_URL", ""),
-        "price": os.getenv("PRO_PRICE", "9.99"),
+        "starter_sales_enabled": starter_enabled,
+        "starter_price": starter_price,
+        "starter_buy_url": starter_buy or "https://www.glassapp.me/buy?tier=starter",
+        "pro_sales_enabled": pro_enabled,
+        "pro_price": pro_price,
+        "pro_buy_url": pro_buy,
+        "intro_active": intro_active,
+        "price_intro": price_intro,
+        "referrals_enabled": referrals_on,
     }
 
+# -------------------- Desktop-tier endpoints --------------------------------
+class VerifyIn(BaseModel):
+    hwid: str = Field(min_length=1)
 
-# -------------------- Admin JSON + tools --------------------
+class ActivateIn(BaseModel):
+    hwid: str = Field(min_length=1)
+    key: str = Field(min_length=1)
+
+class ValidateIn(BaseModel):
+    token: str = Field(min_length=1)
+    hwid: str = Field(min_length=1)
+
+class RefIn(BaseModel):
+    hwid: str = Field(min_length=1)
+
+class IssueIn(BaseModel):
+    max_concurrent: int = Field(default=5, ge=1, le=50)
+    max_activations: int = Field(default=3, ge=1, le=50)
+    tier: str = Field(default="pro")
+    email: Optional[str] = None
+    prefix: str = Field(default="GL")
+
+def _make_key(prefix: str = "GL") -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    parts = ["".join(secrets.choice(alphabet) for _ in range(5)) for __ in range(3)]
+    return f"{prefix}-" + "-".join(parts)
+
+def _is_admin(request: Request, secret_qs: Optional[str]) -> bool:
+    auth = request.headers.get("Authorization", "")
+    bearer = ""
+    if auth.lower().startswith("bearer "):
+        bearer = auth[7:]
+    return bool(ADMIN_SECRET) and (secret_qs == ADMIN_SECRET or bearer == ADMIN_SECRET)
+
+# ---- Helpers for tokens -----------------------------------------------------
+
+def _issue_token(con: sqlite3.Connection, *, license_key: Optional[str], hwid: str, tier: str) -> str:
+    token = secrets.token_urlsafe(32)
+    expires_at = NOW() + TOKEN_TTL_DAYS * 86400 if TOKEN_TTL_DAYS > 0 else None
+    con.execute(
+        "INSERT INTO license_tokens(token, license_key, hwid, tier, created_at, expires_at, revoked) "
+        "VALUES (?,?,?,?,?,?,0)",
+        (token, license_key, hwid, tier, NOW(), expires_at),
+    )
+    return token
+
+def _validate_token(con: sqlite3.Connection, token: str, hwid: str) -> Dict[str, Any]:
+    row = con.execute("SELECT * FROM license_tokens WHERE token=?", (token,)).fetchone()
+    if not row:
+        return {"ok": False, "reason": "unknown_token"}
+    if int(row["revoked"] or 0) == 1:
+        return {"ok": False, "reason": "revoked"}
+    if hwid != row["hwid"]:
+        return {"ok": False, "reason": "hwid_mismatch"}
+    exp = row["expires_at"]
+    if exp is not None and isinstance(exp, int) and NOW() > exp:
+        return {"ok": False, "reason": "expired"}
+    tier = str(row["tier"] or "pro").lower()
+    return {"ok": True, "tier": tier}
+
+# ---- Verify: still supports HWID→tier (for UI caps) -------------------------
+
+@app.post("/verify")
+def verify(body: VerifyIn):
+    u = _get_or_create_user(body.hwid.strip())
+    tier = str(u.get("tier", "free")).lower()
+    resp = {"tier": tier}
+    if u.get("max_windows") is not None:
+        resp["max_windows"] = int(u["max_windows"])
+        return resp
+    if tier == "free":
+        resp["max_windows"] = FREE_MAX_WINDOWS
+    elif tier == "starter":
+        resp["max_windows"] = STARTER_MAX_WINDOWS
+    elif tier == "pro":
+        resp["max_windows"] = PRO_MAX_WINDOWS
+    else:
+        resp["max_windows"] = FREE_MAX_WINDOWS
+    return resp
+
+# ---- Admin: Issue license keys ---------------------------------------------
+
+@app.post("/license/issue")
+def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query(None)):
+    if not _is_admin(request, secret):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    with closing(_db()) as con, con:
+        _init_license_tables(con)
+        key = _make_key(body.prefix)
+        con.execute(
+            "INSERT INTO licenses (license_key, buyer_email, tier, max_concurrent, max_activations) VALUES (?,?,?,?,?)",
+            (key, body.email, body.tier, body.max_concurrent, body.max_activations),
+        )
+        return {"ok": True, "key": key, "tier": body.tier, "max_concurrent": body.max_concurrent, "max_activations": body.max_activations}
+
+# ---- Activate: validates key + HWID, issues opaque token --------------------
+
+@app.post("/license/activate")
+def license_activate(body: ActivateIn):
+    hwid = body.hwid.strip()
+    key = body.key.strip().upper()
+
+    with closing(_db()) as con, con:
+        _init_license_tables(con)
+
+        # 1) Backdoor/legacy prefixes (keep your existing behavior, but issue token too)
+        if key.startswith("PRO-"):
+            tier = "pro"
+            _set_user_tier(hwid, tier, None)
+            token = _issue_token(con, license_key=None, hwid=hwid, tier=tier)
+            return {"ok": True, "tier": tier, "token": token, "max_concurrent": PRO_MAX_WINDOWS, "download_url": DOWNLOAD_URL_PRO}
+
+        if key.startswith("START"):
+            tier = "starter"
+            _set_user_tier(hwid, tier, None)
+            token = _issue_token(con, license_key=None, hwid=hwid, tier=tier)
+            return {"ok": True, "tier": tier, "token": token, "max_concurrent": STARTER_MAX_WINDOWS, "download_url": ""}
+
+        # 2) DB-backed licenses
+        rec = con.execute(
+            "SELECT license_key, tier, max_concurrent, max_activations, revoked FROM licenses WHERE license_key=?",
+            (key,),
+        ).fetchone()
+
+        if rec:
+            if int(rec["revoked"] or 0) == 1:
+                raise HTTPException(status_code=400, detail="disabled")
+            used = con.execute("SELECT COUNT(*) AS c FROM license_activations WHERE license_key=?", (key,)).fetchone()["c"]
+            exists = con.execute("SELECT 1 FROM license_activations WHERE license_key=? AND hwid=?", (key, hwid)).fetchone()
+            if not exists and used >= int(rec["max_activations"] or 0):
+                raise HTTPException(status_code=400, detail="activation_limit")
+
+            # record activation (idempotent)
+            con.execute("INSERT OR IGNORE INTO license_activations (license_key, hwid) VALUES (?,?)", (key, hwid))
+
+            tier = (rec["tier"] or "pro").lower()
+            cap = int(rec["max_concurrent"] or (PRO_MAX_WINDOWS if tier == "pro" else STARTER_MAX_WINDOWS if tier == "starter" else FREE_MAX_WINDOWS))
+
+            _set_user_tier(hwid, tier, None)
+
+            # return (or reuse) a token for this hwid
+            trow = con.execute(
+                "SELECT token FROM license_tokens WHERE license_key=? AND hwid=? AND revoked=0 ORDER BY created_at DESC LIMIT 1",
+                (key, hwid)
+            ).fetchone()
+            if trow:
+                token = trow["token"]
+            else:
+                token = _issue_token(con, license_key=key, hwid=hwid, tier=tier)
+
+            return {"ok": True, "tier": tier, "token": token, "max_concurrent": cap,
+                    "download_url": DOWNLOAD_URL_PRO if tier == "pro" else ""}
+
+        # 3) Admin master key (env)
+        admin_key = (os.getenv("GLASS_ADMIN_KEY") or "").strip().upper()
+        if admin_key and key == admin_key:
+            tier = "pro"
+            _set_user_tier(hwid, tier, None)
+            token = _issue_token(con, license_key=None, hwid=hwid, tier=tier)
+            return {"ok": True, "tier": tier, "token": token, "max_concurrent": PRO_MAX_WINDOWS, "download_url": DOWNLOAD_URL_PRO}
+
+    raise HTTPException(status_code=400, detail="invalid key")
+
+# ---- Validate: client sends token + HWID, server confirms -------------------
+
+@app.post("/license/validate")
+def license_validate(body: ValidateIn):
+    hwid = body.hwid.strip()
+    token = body.token.strip()
+    with closing(_db()) as con, con:
+        _init_license_tables(con)
+        res = _validate_token(con, token, hwid)
+        if not res.get("ok"):
+            return {"ok": False, "reason": res.get("reason", "invalid")}
+        tier = res["tier"]
+        # Optional: keep users.tier roughly in sync for /verify UX
+        _set_user_tier(hwid, tier, None)
+        return {"ok": True, "tier": tier, "download_url": DOWNLOAD_URL_PRO if tier == "pro" else ""}
+
+@app.post("/ref/create")
+def ref_create(body: 'RefIn'):
+    hwid = body.hwid.strip()
+    code = hashlib.sha1(hwid.encode("utf-8")).hexdigest()[:8].upper()
+    launch = os.getenv("LAUNCH_URL", "https://www.glassapp.me/launch")
+    return {"ref_url": f"{launch}?ref={code}", "ref_code": code}
+
+# -------------------- Admin helpers (safe if db.py missing) -----------------
 
 def _check_admin(secret: str):
     if not ADMIN_SECRET or secret != ADMIN_SECRET:
@@ -138,265 +502,47 @@ def admin_migrate_add_revoked(secret: str = Query(...)):
             tried.append(f"if_not_exists_failed:{type(e2).__name__}")
             return {"ok": True, "result": "probably_exists", "detail": tried}
 
-@app.get("/admin/sales")
-def admin_sales(secret: str, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
+# Optional: bulk token migration for legacy activations (issue tokens for all)
+@app.post("/admin/migrate/tokens")
+def admin_migrate_tokens(secret: str = Query(...)):
     _check_admin(secret)
-    rows = query_all(
-        """
-        SELECT sale_id, buyer_email, product_id, product_name, product_permalink,
-               price_cents, quantity, refunded, created_at
-        FROM gumroad_sales
-        ORDER BY created_at DESC
-        LIMIT :limit OFFSET :offset
-        """,
-        {"limit": limit, "offset": offset},
-    )
-    return {"ok": True, "rows": rows, "count": len(rows)}
+    issued = 0
+    with closing(_db()) as con, con:
+        _init_license_tables(con)
+        acts = con.execute("SELECT license_key, hwid FROM license_activations").fetchall()
+        for a in acts:
+            # Skip if a valid token already exists
+            trow = con.execute(
+                "SELECT token FROM license_tokens WHERE license_key=? AND hwid=? AND revoked=0 LIMIT 1",
+                (a["license_key"], a["hwid"])
+            ).fetchone()
+            if trow:
+                continue
+            lic = con.execute(
+                "SELECT tier FROM licenses WHERE license_key=? AND revoked=0",
+                (a["license_key"],)
+            ).fetchone()
+            tier = (lic["tier"] if lic else "pro").lower()
+            _issue_token(con, license_key=a["license_key"], hwid=a["hwid"], tier=tier)
+            issued += 1
+    return {"ok": True, "issued": issued}
 
-@app.get("/admin/sales/{sale_id}")
-def admin_sale_by_id(sale_id: str, secret: str):
-    _check_admin(secret)
-    rows = query_all("SELECT * FROM gumroad_sales WHERE sale_id = :sid", {"sid": sale_id})
-    if not rows:
-        raise HTTPException(status_code=404, detail="Not found")
-    return {"ok": True, "sale": rows[0]}
-
-@app.post("/admin/test-email")
-def admin_test_email(to: str = Query(...), secret: str = Query(...)):
-    _check_admin(secret)
-    send_mail(to, "Glass test", "It works! – Glass")
-    return {"ok": True}
-
-
-# -------------------- Inline Admin UI (HTML-only) --------------------
-
-@app.get("/admin/ui", response_class=HTMLResponse)
-def admin_ui():
-    html = r"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Glass Admin • Sales</title>
-  <style>
-    :root { --bg:#0f1115; --card:#161a22; --muted:#9aa7b5; --text:#e6edf3; --accent:#6ea8fe; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; }
-    * { box-sizing: border-box; }
-    html,body { margin:0; padding:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial; }
-    header { padding:16px 20px; border-bottom:1px solid #212836; background:var(--card); position:sticky; top:0; z-index:10;}
-    h1 { font-size:16px; margin:0; letter-spacing:.2px; }
-    .muted { color:var(--muted); }
-    .wrap { max-width:1100px; margin:16px auto; padding:0 16px; }
-    .controls { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; align-items:center; }
-    input, select, button { background:#0f1525; color:var(--text); border:1px solid #263044; border-radius:10px; padding:8px 10px; }
-    input:focus, button:focus { outline:1px solid var(--accent); }
-    button { cursor:pointer; }
-    table { width:100%; border-collapse:collapse; background:var(--card); border-radius:14px; overflow:hidden; }
-    th, td { padding:10px 12px; border-bottom:1px solid #212836; text-align:left; vertical-align:top; }
-    th { font-weight:600; color:#b9c4d0; background:#151a23; position:sticky; top:61px; z-index:5; }
-    td .pill { padding:2px 8px; border-radius:999px; font-size:12px; }
-    .ok { background:#16341f; color:#8bf0a4; }
-    .warn { background:#3a2a13; color:#f6d399; }
-    .bad { background:#3b1212; color:#ffb4b4; }
-    .row-actions { display:flex; gap:6px; }
-    .row-actions a, .row-actions button { padding:6px 8px; border-radius:8px; border:1px solid #2b354a; background:#11182a; color:#cfe0ff; text-decoration:none; }
-    .foot { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:10px; }
-    .link { color:#cfe0ff; }
-    .small { font-size:12px; }
-  </style>
-</head>
-<body>
-<header>
-  <h1>Glass Admin <span class="muted">/ Sales</span></h1>
-</header>
-
-<div class="wrap">
-  <div class="controls">
-    <label class="small muted">Secret</label>
-    <input id="secret" placeholder="ADMIN_SECRET" size="36" />
-    <label class="small muted">Limit</label>
-    <select id="limit">
-      <option>20</option><option selected>50</option><option>100</option><option>200</option>
-    </select>
-    <button id="apply">Apply</button>
-    <button id="export">Export CSV</button>
-    <span id="status" class="small muted"></span>
-  </div>
-
-  <table id="tbl">
-    <thead>
-      <tr>
-        <th style="width:210px">Sale</th>
-        <th style="width:240px">Buyer</th>
-        <th>Product</th>
-        <th style="width:120px">Price × Qty</th>
-        <th style="width:180px">Created</th>
-        <th style="width:180px">Actions</th>
-      </tr>
-    </thead>
-    <tbody id="rows"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
-  </table>
-
-  <div class="foot">
-    <div class="small muted" id="count"></div>
-    <div>
-      <button id="prev">Prev</button>
-      <button id="next">Next</button>
-    </div>
-  </div>
-</div>
-
-<script>
-(function(){
-  const $ = sel => document.querySelector(sel);
-  const params = new URLSearchParams(location.search);
-  const origin = location.origin;
-  const secretInp = $('#secret');
-  const limitSel = $('#limit');
-  const status = $('#status');
-  const rowsEl = $('#rows');
-  const countEl = $('#count');
-  let offset = parseInt(params.get('offset')||'0',10);
-  let limit  = parseInt(params.get('limit') || '50',10);
-  let secret = params.get('secret') || '';
-
-  secretInp.value = secret;
-  limitSel.value = String(limit);
-
-  function setStatus(s){ status.textContent = s || ''; }
-  function fmtMoney(cents){ if(cents==null) return '-'; return '$'+(cents/100).toFixed(2); }
-  function esc(s){ return (s||'').toString().replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
-
-  async function load(){
-    if(!secret){ setStatus('Set secret then Apply'); rowsEl.innerHTML = '<tr><td colspan="6" class="muted">No secret</td></tr>'; return; }
-    setStatus('Loading…');
-    const qs = new URLSearchParams({ secret, limit: String(limit), offset: String(offset) });
-    const r = await fetch(`${origin}/admin/sales?`+qs.toString(), { cache:'no-store' });
-    if(!r.ok){
-      rowsEl.innerHTML = `<tr><td colspan="6">Error ${r.status}</td></tr>`;
-      setStatus('Error '+r.status);
-      return;
-    }
-    const data = await r.json();
-    render(data.rows||[], data.count||0);
-    setStatus('');
-  }
-
-  function render(rows, count){
-    countEl.textContent = count ? `${count} rows` : '';
-    if(!rows.length){
-      rowsEl.innerHTML = '<tr><td colspan="6" class="muted">No data</td></tr>';
-      return;
-    }
-    rowsEl.innerHTML = rows.map(r=>{
-      const pid = esc(r.product_id||'');
-      const pname = esc(r.product_name||'');
-      const email = esc(r.buyer_email||'');
-      const sale = esc(r.sale_id||'');
-      const created = esc(r.created_at||'');
-      const price = fmtMoney(r.price_cents);
-      const qty = r.quantity ?? 1;
-      const refunded = r.refunded ? '<span class="pill bad">refunded</span>' : '<span class="pill ok">paid</span>';
-      const viewJson = `${origin}/admin/sales/${encodeURIComponent(sale)}?secret=${encodeURIComponent(secret)}`;
-      return `
-      <tr>
-        <td><code>${sale}</code><div class="small muted">${refunded}</div></td>
-        <td>${email}</td>
-        <td>${pname || pid}</td>
-        <td>${price} × ${qty}</td>
-        <td>${created}</td>
-        <td class="row-actions">
-          <button onclick="navigator.clipboard.writeText('${sale}')">Copy ID</button>
-          <a class="link" target="_blank" href="${viewJson}">JSON</a>
-        </td>
-      </tr>`;
-    }).join('');
-  }
-
-  $('#apply').onclick = ()=>{
-    secret = secretInp.value.trim();
-    limit  = parseInt(limitSel.value,10);
-    offset = 0;
-    const next = new URL(location.href);
-    next.searchParams.set('secret', secret);
-    next.searchParams.set('limit',  String(limit));
-    next.searchParams.set('offset', String(offset));
-    history.replaceState(null, '', next.toString());
-    load();
-  };
-
-  $('#prev').onclick = ()=>{
-    offset = Math.max(0, offset - limit);
-    const next = new URL(location.href);
-    next.searchParams.set('offset', String(offset));
-    history.replaceState(null, '', next.toString());
-    load();
-  };
-
-  $('#next').onclick = ()=>{
-    offset = offset + limit;
-    const next = new URL(location.href);
-    next.searchParams.set('offset', String(offset));
-    history.replaceState(null, '', next.toString());
-    load();
-  };
-
-  $('#export').onclick = async ()=>{
-    if(!secret){ alert('Set secret first'); return; }
-    const qs = new URLSearchParams({ secret, limit: '200', offset: '0' });
-    const r = await fetch(`${origin}/admin/sales?`+qs.toString(), { cache:'no-store' });
-    if(!r.ok){ alert('Export failed: '+r.status); return; }
-    const data = await r.json();
-    const rows = data.rows || [];
-    const cols = ["sale_id","buyer_email","product_id","product_name","product_permalink","price_cents","quantity","refunded","created_at"];
-    const csv = [cols.join(",")].concat(
-      rows.map(o => cols.map(k=>{
-        const v = (o[k] ?? '').toString().replace(/"/g,'""');
-        return /[",\n]/.test(v) ? `"${v}"` : v;
-      }).join(","))
-    ).join("\n");
-    const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'gumroad_sales.csv';
-    a.click();
-    URL.revokeObjectURL(a.href);
-  };
-
-  if(secret) load();
-})();
-</script>
-</body>
-</html>
-    """
-    return HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
-
-
-# -------------------- Payments routers --------------------
-
-# New namespaced routes under /payments/*
-app.include_router(gumroad_router,   prefix="/payments")     # /payments/gumroad
-app.include_router(stripe_router,    prefix="/payments")     # /payments/stripe
-app.include_router(lemon_router,     prefix="/payments")     # /payments/lemonsqueezy
-
-# Back-compat legacy paths for Gumroad
-app.include_router(gumroad_router)                           # /gumroad
-app.include_router(gumroad_router, prefix="/webhooks")       # /webhooks/gumroad
-
-
-# -------------------- Nice 404 for /launch --------------------
+# -------------------- Routers & 404 for /launch -----------------------------
+app.include_router(gumroad_router, prefix="/payments")
+app.include_router(stripe_router, prefix="/payments")
+app.include_router(lemon_router, prefix="/payments")
+app.include_router(gumroad_router)
+app.include_router(gumroad_router, prefix="/webhooks")
 
 @app.exception_handler(404)
-async def not_found(request, exc):
-    # Return static 404 for /launch paths; otherwise JSON
+async def not_found(request: Request, exc):
     if str(request.url.path).startswith("/launch"):
         nf = WEB_DIR / "404.html"
         if nf.exists():
             return FileResponse(nf, status_code=404)
     return JSONResponse({"detail": "Not Found"}, status_code=404)
 
-
-# -------------------- Uvicorn local run --------------------
-
+# -------------------- Local run --------------------------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
