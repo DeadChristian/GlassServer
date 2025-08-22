@@ -8,3 +8,9 @@ build/
 .glass_settings.json
 # optional: keep installers out of git
 *.exe
+.env
+web/.env
+glass.db
+__pycache__/
+*.pyc
+.venv/
