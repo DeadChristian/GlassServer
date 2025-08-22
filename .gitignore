@@ -32,3 +32,11 @@ glass.db
 __pycache__/
 *.pyc
 .venv/
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.log
+.env
+glass.db
