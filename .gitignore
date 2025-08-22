@@ -1,12 +1,10 @@
-__pycache__/
-*.pyc
+﻿__pycache__/
 .venv/
-.env
-*.db
-openapi.json
-__pycache__/
-.venv/
-.env
-*.env
-glass.db
-static/GlassSetup.exe
+dist/
+build/
+*.spec
+*.log
+# user config
+.glass_settings.json
+# optional: keep installers out of git
+*.exe
