@@ -26,3 +26,9 @@ glass.db
 __pycache__/
 *.pyc
 .venv/
+.env
+web/.env
+glass.db
+__pycache__/
+*.pyc
+.venv/
