@@ -220,66 +220,105 @@ def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query
 
 @app.post("/license/activate")
 def license_activate(body: ActivateIn):
-    hwid = body.hwid.strip()
-    key  = body.key.strip().upper()
-    with closing(_db()) as con, con:
+    import traceback
+    try:
+        hwid = body.hwid.strip()
+        key  = body.key.strip().upper()
         _init_db()
 
-        # Legacy fixed prefixes (no DB)
+        # Legacy prefixes (no DB-backed license required)
         if key.startswith("PRO-"):
             tier = "pro"
-            _set_user_tier(hwid, tier)
-            token = _issue_token(con, license_key=None, hwid=hwid, tier=tier)
-            return {"ok": True, "tier": tier, "token": token,
-                    "max_concurrent": PRO_MAX_WINDOWS, "download_url": DOWNLOAD_URL_PRO}
+            with closing(_db()) as con, con:
+                _set_user_tier(hwid, tier)
+                token = _issue_token(con, license_key=None, hwid=hwid, tier=tier)
+            return {
+                "ok": True, "tier": tier, "token": token,
+                "max_concurrent": PRO_MAX_WINDOWS,
+                "download_url": DOWNLOAD_URL_PRO
+            }
+
         if key.startswith("START"):
             tier = "starter"
-            _set_user_tier(hwid, tier)
-            token = _issue_token(con, license_key=None, hwid=hwid, tier=tier)
-            return {"ok": True, "tier": tier, "token": token,
-                    "max_concurrent": STARTER_MAX_WINDOWS, "download_url": ""}
+            with closing(_db()) as con, con:
+                _set_user_tier(hwid, tier)
+                token = _issue_token(con, license_key=None, hwid=hwid, tier=tier)
+            return {
+                "ok": True, "tier": tier, "token": token,
+                "max_concurrent": STARTER_MAX_WINDOWS,
+                "download_url": ""
+            }
 
-        # DB-backed keys
-        rec = con.execute("SELECT * FROM licenses WHERE license_key=?", (key,)).fetchone()
-        if not rec: raise HTTPException(status_code=400, detail="invalid_key")
-        if int(rec["revoked"] or 0) == 1: raise HTTPException(status_code=400, detail="revoked")
+        # DB-backed license keys
+        with closing(_db()) as con, con:
+            rec = con.execute("SELECT * FROM licenses WHERE license_key=?", (key,)).fetchone()
+            if not rec:
+                raise HTTPException(status_code=400, detail="invalid_key")
+            if int(rec["revoked"] or 0) == 1:
+                raise HTTPException(status_code=400, detail="revoked")
 
-        used = con.execute("SELECT COUNT(*) AS c FROM license_activations WHERE license_key=?", (key,)).fetchone()["c"]
-        exists = con.execute("SELECT 1 FROM license_activations WHERE license_key=? AND hwid=?", (key, hwid)).fetchone()
-        if not exists and used >= int(rec["max_activations"] or 1):
-            raise HTTPException(status_code=403, detail="activation_limit_reached")
-        con.execute("INSERT OR IGNORE INTO license_activations (license_key, hwid) VALUES (?,?)", (key, hwid))
+            used = con.execute(
+                "SELECT COUNT(*) AS c FROM license_activations WHERE license_key=?",
+                (key,)
+            ).fetchone()["c"]
+            exists = con.execute(
+                "SELECT 1 FROM license_activations WHERE license_key=? AND hwid=?",
+                (key, hwid)
+            ).fetchone()
 
-        tier = (rec["tier"] or "pro").lower()
-        if tier == "pro":
-            cap = int(rec["max_concurrent"] or PRO_MAX_WINDOWS)
-        elif tier == "starter":
-            cap = int(rec["max_concurrent"] or STARTER_MAX_WINDOWS)
-        else:
-            cap = FREE_MAX_WINDOWS
+            if not exists and used >= int(rec["max_activations"] or 1):
+                raise HTTPException(status_code=403, detail="activation_limit_reached")
 
-        trow = con.execute(
-            "SELECT token FROM license_tokens WHERE license_key=? AND hwid=? AND revoked=0 ORDER BY created_at DESC LIMIT 1",
-            (key, hwid)
-        ).fetchone()
-        token = trow["token"] if trow else _issue_token(con, license_key=key, hwid=hwid, tier=tier)
+            con.execute(
+                "INSERT OR IGNORE INTO license_activations (license_key, hwid) VALUES (?,?)",
+                (key, hwid)
+            )
 
-        _set_user_tier(hwid, tier)
-        return {"ok": True, "tier": tier, "token": token, "max_concurrent": cap,
-                "download_url": DOWNLOAD_URL_PRO if tier == "pro" else ""}
+            tier = (rec["tier"] or "pro").lower()
+            if tier == "pro":
+                cap = int(rec["max_concurrent"] or PRO_MAX_WINDOWS)
+            elif tier == "starter":
+                cap = int(rec["max_concurrent"] or STARTER_MAX_WINDOWS)
+            else:
+                cap = FREE_MAX_WINDOWS
 
-@app.post("/license/validate")
-def license_validate(body: ValidateIn):
-    hwid = body.hwid.strip()
-    tok  = body.token.strip()
-    with closing(_db()) as con, con:
-        res = _validate_token(con, tok, hwid)
-        if not res.get("ok"):
-            return {"ok": False, "reason": res.get("reason", "invalid")}
-        tier = res["tier"]
-        _set_user_tier(hwid, tier)
-        return {"ok": True, "tier": tier,
-                "download_url": DOWNLOAD_URL_PRO if tier == "pro" else ""}
+            trow = con.execute(
+                "SELECT token FROM license_tokens WHERE license_key=? AND hwid=? AND revoked=0 ORDER BY created_at DESC LIMIT 1",
+                (key, hwid)
+            ).fetchone()
+            token = trow["token"] if trow else _issue_token(con, license_key=key, hwid=hwid, tier=tier)
+
+        return {
+            "ok": True, "tier": tier, "token": token,
+            "max_concurrent": cap,
+            "download_url": DOWNLOAD_URL_PRO if tier == "pro" else ""
+        }
+
+    except HTTPException:
+        # FastAPI errors pass through unchanged
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        # Surface the exact reason to the client
+        raise HTTPException(status_code=500, detail=f"activate_error: {e.__class__.__name__}: {e}")
+
+@app.get("/admin/db-diag")
+def db_diag():
+    import os, traceback
+    try:
+        # basic write test
+        with closing(_db()) as con, con:
+            con.execute("CREATE TABLE IF NOT EXISTS _diag (k TEXT PRIMARY KEY, v TEXT)")
+            con.execute("INSERT OR REPLACE INTO _diag(k,v) VALUES (?,?)", ("ts", str(int(time.time()))))
+            row = con.execute("SELECT COUNT(*) AS c FROM _diag").fetchone()
+        return {
+            "db_path": os.path.abspath(DB_PATH),
+            "writable": True,
+            "rows_in_diag": int(row["c"])
+        }
+    except Exception as e:
+        traceback.print_exc()
+        return {"db_path": os.path.abspath(DB_PATH), "writable": False, "error": f"{e.__class__.__name__}: {e}"}
 
 @app.post("/verify")
 def verify(body: VerifyIn):
