@@ -1,7 +1,9 @@
-# main.py — GlassServer (minimal, stable, Docker-friendly)
-# Endpoints: /, /healthz, /public-config, /license/issue, /license/activate,
-#            /license/validate, /verify, /buy, /static (mounted), /static-list
-import os, sqlite3, time, secrets, string
+ï»¿# main.py - GlassServer (ASCII only)
+import os
+import sqlite3
+import time
+import secrets
+import string
 from contextlib import closing
 from typing import Optional, Dict, Any
 from pathlib import Path
@@ -12,40 +14,40 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-# -- Env ----------------------------------------------------------------------
-DOMAIN              = os.getenv("DOMAIN", "").rstrip("/")
-# Where the Pro installer is hosted (default: your /static path on this domain)
-DOWNLOAD_URL_PRO    = os.getenv(
+# ----- Env -----
+DOMAIN = os.getenv("DOMAIN", "").rstrip("/")
+DOWNLOAD_URL_PRO = os.getenv(
     "DOWNLOAD_URL_PRO",
     f"{DOMAIN}/static/GlassSetup.exe" if DOMAIN else ""
 )
-ADMIN_SECRET        = os.getenv("ADMIN_SECRET", "")
-DB_PATH             = os.getenv("DB_PATH", "glass.db")
-TOKEN_TTL_DAYS      = int(os.getenv("TOKEN_TTL_DAYS", "90"))
-FREE_MAX_WINDOWS    = int(os.getenv("FREE_MAX_WINDOWS", "1"))
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
+DB_PATH = os.getenv("DB_PATH", "glass.db")
+TOKEN_TTL_DAYS = int(os.getenv("TOKEN_TTL_DAYS", "90"))
+FREE_MAX_WINDOWS = int(os.getenv("FREE_MAX_WINDOWS", "1"))
 STARTER_MAX_WINDOWS = int(os.getenv("STARTER_MAX_WINDOWS", "2"))
-PRO_MAX_WINDOWS     = int(os.getenv("PRO_MAX_WINDOWS", "5"))
-PRO_BUY_URL         = os.getenv("PRO_BUY_URL", "https://gumroad.com/l/xvphp").strip()
+PRO_MAX_WINDOWS = int(os.getenv("PRO_MAX_WINDOWS", "5"))
+PRO_BUY_URL = os.getenv("PRO_BUY_URL", "https://gumroad.com/l/xvphp").strip()
 
-NOW = lambda: int(time.time())
+now = lambda: int(time.time())
 
-# -- App ----------------------------------------------------------------------
+# ----- App -----
 app = FastAPI(title="GlassServer", version=os.getenv("APP_VERSION", "1.0.0"))
 
-# permissive CORS (desktop client requests)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=False,
-    allow_methods=["*"], allow_headers=["*"],
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# --- Static mount (absolute; avoids CWD issues on Railway/Docker) ---
+# Static mount using absolute path (works in Docker/Railway)
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "web" / "static"
-STATIC_DIR.mkdir(parents=True, exist_ok=True)  # harmless if exists
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# -- DB -----------------------------------------------------------------------
+# ----- DB -----
 def _db() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.row_factory = sqlite3.Row
@@ -102,7 +104,7 @@ def _init_db() -> None:
 
 _init_db()
 
-# -- Models -------------------------------------------------------------------
+# ----- Models -----
 class IssueIn(BaseModel):
     max_concurrent: int = Field(default=5, ge=1, le=50)
     max_activations: int = Field(default=1, ge=1, le=50)
@@ -121,7 +123,7 @@ class ValidateIn(BaseModel):
 class VerifyIn(BaseModel):
     hwid: str = Field(min_length=1)
 
-# -- Helpers ------------------------------------------------------------------
+# ----- Helpers -----
 def _set_user_tier(hwid: str, tier: str, max_windows: Optional[int] = None) -> None:
     with closing(_db()) as con, con:
         row = con.execute("SELECT id FROM users WHERE hwid=?", (hwid,)).fetchone()
@@ -135,15 +137,15 @@ def _set_user_tier(hwid: str, tier: str, max_windows: Optional[int] = None) -> N
 
 def _make_key(prefix: str = "GL") -> str:
     alphabet = string.ascii_uppercase + string.digits
-    parts = ["".join(serets.choice(alphabet) for _ in range(5)) for __ in range(3)]
+    parts = ["".join(secrets.choice(alphabet) for _ in range(5)) for __ in range(3)]
     return f"{prefix}-" + "-".join(parts)
 
 def _issue_token(con: sqlite3.Connection, *, license_key: Optional[str], hwid: str, tier: str) -> str:
     token = secrets.token_urlsafe(32)
-    expires_at = NOW() + TOKEN_TTL_DAYS * 86400 if TOKEN_TTL_DAYS > 0 else None
+    expires_at = now() + TOKEN_TTL_DAYS * 86400 if TOKEN_TTL_DAYS > 0 else None
     con.execute(
         "INSERT INTO license_tokens(token, license_key, hwid, tier, created_at, expires_at, revoked) VALUES (?,?,?,?,?,?,0)",
-        (token, license_key, hwid, tier, NOW(), expires_at)
+        (token, license_key, hwid, tier, now(), expires_at)
     )
     return token
 
@@ -156,7 +158,7 @@ def _validate_token(con: sqlite3.Connection, token: str, hwid: str) -> Dict[str,
     if hwid != row["hwid"]:
         return {"ok": False, "reason": "hwid_mismatch"}
     exp = row["expires_at"]
-    if exp is not None and isinstance(exp, int) and NOW() > exp:
+    if exp is not None and isinstance(exp, int) and now() > exp:
         return {"ok": False, "reason": "expired"}
     return {"ok": True, "tier": str(row["tier"] or "pro").lower()}
 
@@ -166,7 +168,7 @@ def _require_admin(secret_qs: Optional[str], request: Request) -> None:
     if not ADMIN_SECRET or (secret_qs != ADMIN_SECRET and bearer != ADMIN_SECRET):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-# -- Routes -------------------------------------------------------------------
+# ----- Routes -----
 @app.get("/")
 def root():
     return {"ok": True, "service": "glass", "docs": "/docs", "health": "/healthz"}
@@ -185,7 +187,7 @@ def public_config(response: Response):
         "starter_buy_url": os.getenv("STARTER_BUY_URL", "https://gumroad.com/l/kisnxu"),
         "pro_sales_enabled": os.getenv("PRO_SALES_ENABLED", "1") in ("1","true","True"),
         "pro_price": os.getenv("PRO_PRICE", "9.99"),
-        "pro_buy_url": PRO_BUY_URL,  # env wins
+        "pro_buy_url": PRO_BUY_URL,
         "intro_active": os.getenv("INTRO_ACTIVE", "1") in ("1","true","True"),
         "price_intro": os.getenv("PRICE_INTRO", "5"),
         "referrals_enabled": os.getenv("REFERRALS_ENABLED", "1") in ("1","true","True"),
@@ -193,12 +195,10 @@ def public_config(response: Response):
 
 @app.get("/buy")
 def buy_redirect(tier: str = "pro"):
-    # simple 307 ? checkout page (env-configurable)
     return RedirectResponse(url=PRO_BUY_URL, status_code=307)
 
 @app.get("/static-list")
 def static_list():
-    """Debug helper to confirm what the container is serving under /static"""
     try:
         files = sorted(p.name for p in STATIC_DIR.iterdir()) if STATIC_DIR.exists() else []
         return {"root": str(ROOT), "static": str(STATIC_DIR), "exists": STATIC_DIR.exists(), "files": files}
@@ -251,11 +251,13 @@ def license_activate(body: ActivateIn):
         con.execute("INSERT OR IGNORE INTO license_activations (license_key, hwid) VALUES (?,?)", (key, hwid))
 
         tier = (rec["tier"] or "pro").lower()
-        cap  = int(rec["max_concurrent"] or (PRO_MAX_WINDOWS if tier=="pro"
-                                             else STARTER_MAX_WINDOWS if tier=="starter"
-                                             else FREE_MAX_WINDOWS))
+        if tier == "pro":
+            cap = int(rec["max_concurrent"] or PRO_MAX_WINDOWS)
+        elif tier == "starter":
+            cap = int(rec["max_concurrent"] or STARTER_MAX_WINDOWS)
+        else:
+            cap = FREE_MAX_WINDOWS
 
-        # Reuse token for this HWID if one exists
         trow = con.execute(
             "SELECT token FROM license_tokens WHERE license_key=? AND hwid=? AND revoked=0 ORDER BY created_at DESC LIMIT 1",
             (key, hwid)
@@ -294,10 +296,8 @@ def verify(body: VerifyIn):
         return {"tier": "pro", "max_windows": PRO_MAX_WINDOWS}
     return {"tier": "free", "max_windows": FREE_MAX_WINDOWS}
 
-# -- Run uvicorn from Python (no shell, no $PORT expansion issues) ------------
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
-
 
