@@ -1,4 +1,4 @@
-﻿# main.py — GlassServer (minimal, stable, Docker-friendly)
+# main.py � GlassServer (minimal, stable, Docker-friendly)
 # Endpoints: /, /healthz, /public-config, /license/issue, /license/activate,
 #            /license/validate, /verify, /buy, /static (mounted), /static-list
 import os, sqlite3, time, secrets, string
@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-# ── Env ──────────────────────────────────────────────────────────────────────
+# -- Env ----------------------------------------------------------------------
 DOMAIN              = os.getenv("DOMAIN", "").rstrip("/")
 # Where the Pro installer is hosted (default: your /static path on this domain)
 DOWNLOAD_URL_PRO    = os.getenv(
@@ -29,7 +29,7 @@ PRO_BUY_URL         = os.getenv("PRO_BUY_URL", "https://gumroad.com/l/xvphp").st
 
 NOW = lambda: int(time.time())
 
-# ── App ──────────────────────────────────────────────────────────────────────
+# -- App ----------------------------------------------------------------------
 app = FastAPI(title="GlassServer", version=os.getenv("APP_VERSION", "1.0.0"))
 
 # permissive CORS (desktop client requests)
@@ -45,7 +45,7 @@ STATIC_DIR = ROOT / "web" / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)  # harmless if exists
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# ── DB ───────────────────────────────────────────────────────────────────────
+# -- DB -----------------------------------------------------------------------
 def _db() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.row_factory = sqlite3.Row
@@ -102,7 +102,7 @@ def _init_db() -> None:
 
 _init_db()
 
-# ── Models ───────────────────────────────────────────────────────────────────
+# -- Models -------------------------------------------------------------------
 class IssueIn(BaseModel):
     max_concurrent: int = Field(default=5, ge=1, le=50)
     max_activations: int = Field(default=1, ge=1, le=50)
@@ -121,7 +121,7 @@ class ValidateIn(BaseModel):
 class VerifyIn(BaseModel):
     hwid: str = Field(min_length=1)
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# -- Helpers ------------------------------------------------------------------
 def _set_user_tier(hwid: str, tier: str, max_windows: Optional[int] = None) -> None:
     with closing(_db()) as con, con:
         row = con.execute("SELECT id FROM users WHERE hwid=?", (hwid,)).fetchone()
@@ -166,7 +166,7 @@ def _require_admin(secret_qs: Optional[str], request: Request) -> None:
     if not ADMIN_SECRET or (secret_qs != ADMIN_SECRET and bearer != ADMIN_SECRET):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-# ── Routes ───────────────────────────────────────────────────────────────────
+# -- Routes -------------------------------------------------------------------
 @app.get("/")
 def root():
     return {"ok": True, "service": "glass", "docs": "/docs", "health": "/healthz"}
@@ -193,7 +193,7 @@ def public_config(response: Response):
 
 @app.get("/buy")
 def buy_redirect(tier: str = "pro"):
-    # simple 307 → checkout page (env-configurable)
+    # simple 307 ? checkout page (env-configurable)
     return RedirectResponse(url=PRO_BUY_URL, status_code=307)
 
 @app.get("/static-list")
@@ -294,8 +294,10 @@ def verify(body: VerifyIn):
         return {"tier": "pro", "max_windows": PRO_MAX_WINDOWS}
     return {"tier": "free", "max_windows": FREE_MAX_WINDOWS}
 
-# ── Run uvicorn from Python (no shell, no $PORT expansion issues) ────────────
+# -- Run uvicorn from Python (no shell, no $PORT expansion issues) ------------
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
+
+
