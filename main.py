@@ -8,7 +8,7 @@ from contextlib import closing
 from typing import Optional, Dict, Any
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, Response, Query
+from fastapi import FastAPI, HTTPException, Request, Response, Query, Depends  # ADD: Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
@@ -20,6 +20,10 @@ DOWNLOAD_URL_PRO = os.getenv(
     "DOWNLOAD_URL_PRO",
     f"{DOMAIN}/static/GlassSetup.exe" if DOMAIN else ""
 )
+ADDONS_URL = os.getenv(  # ADD: expose addons URL
+    "ADDONS_URL",
+    f"{DOMAIN}/static/pro_addons_v1.zip" if DOMAIN else ""
+)
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
 DB_PATH = os.getenv("DB_PATH", "glass.db")
 TOKEN_TTL_DAYS = int(os.getenv("TOKEN_TTL_DAYS", "90"))
@@ -27,11 +31,12 @@ FREE_MAX_WINDOWS = int(os.getenv("FREE_MAX_WINDOWS", "1"))
 STARTER_MAX_WINDOWS = int(os.getenv("STARTER_MAX_WINDOWS", "2"))
 PRO_MAX_WINDOWS = int(os.getenv("PRO_MAX_WINDOWS", "5"))
 PRO_BUY_URL = os.getenv("PRO_BUY_URL", "https://gumroad.com/l/xvphp").strip()
+APP_VERSION = os.getenv("APP_VERSION", "1.0.0")  # ADD: visible in FastAPI title
 
 now = lambda: int(time.time())
 
 # ----- App -----
-app = FastAPI(title="GlassServer", version=os.getenv("APP_VERSION", "1.0.0"))
+app = FastAPI(title="GlassServer", version=APP_VERSION)
 
 app.add_middleware(
     CORSMiddleware,
@@ -165,16 +170,34 @@ def _validate_token(con: sqlite3.Connection, token: str, hwid: str) -> Dict[str,
         return {"ok": False, "reason": "revoked"}
     if hwid != row["hwid"]:
         return {"ok": False, "reason": "hwid_mismatch"}
-    exp = row["expires_at"]
-    if exp is not None and isinstance(exp, int) and now() > exp:
+    exp_raw = row["expires_at"]
+    try:
+        exp = int(exp_raw) if exp_raw is not None else None  # HARDEN: coerce
+    except Exception:
+        exp = None
+    if exp is not None and now() > exp:
         return {"ok": False, "reason": "expired"}
     return {"ok": True, "tier": str(row["tier"] or "pro").lower()}
 
+# --- ADD: robust Bearer parsing + optional ?secret fallback ---
+def _extract_bearer(request: Request) -> Optional[str]:
+    auth = request.headers.get("Authorization") or request.headers.get("authorization")
+    if not auth:
+        return None
+    parts = auth.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return parts[1].strip() or None
+
 def _require_admin(secret_qs: Optional[str], request: Request) -> None:
-    hdr = request.headers.get("Authorization", "")
-    bearer = hdr[7:] if hdr.lower().startswith("bearer ") else ""
-    if not ADMIN_SECRET or (secret_qs != ADMIN_SECRET and bearer != ADMIN_SECRET):
+    token = _extract_bearer(request) or (secret_qs or "")
+    if not ADMIN_SECRET:
+        raise HTTPException(status_code=500, detail="ADMIN_SECRET not set")
+    if token != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
+
+def AdminGuard(request: Request, secret: Optional[str] = Query(None)):
+    _require_admin(secret, request)
 
 # ----- Routes -----
 @app.get("/")
@@ -199,6 +222,10 @@ def public_config(response: Response):
         "intro_active": os.getenv("INTRO_ACTIVE", "1") in ("1","true","True"),
         "price_intro": os.getenv("PRICE_INTRO", "5"),
         "referrals_enabled": os.getenv("REFERRALS_ENABLED", "1") in ("1","true","True"),
+        # ADD: expose helpful links for debugging/clients
+        "download_url_pro": DOWNLOAD_URL_PRO,
+        "addons_url": ADDONS_URL,
+        "launch_url": os.getenv("LAUNCH_URL", ""),
     }
 
 @app.get("/buy")
@@ -214,7 +241,7 @@ def static_list():
         return {"error": str(e)}
 
 @app.post("/license/issue")
-def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query(None)):
+def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):  # ADD guard via Depends
     _require_admin(secret, request)
     with closing(_db()) as con, con:
         _init_db()
@@ -243,7 +270,8 @@ def license_activate(body: ActivateIn):
             return {
                 "ok": True, "tier": tier, "token": token,
                 "max_concurrent": PRO_MAX_WINDOWS,
-                "download_url": DOWNLOAD_URL_PRO
+                "download_url": DOWNLOAD_URL_PRO,
+                "addons_url": ADDONS_URL  # ADD
             }
 
         if key.startswith("START"):
@@ -254,7 +282,8 @@ def license_activate(body: ActivateIn):
             return {
                 "ok": True, "tier": tier, "token": token,
                 "max_concurrent": STARTER_MAX_WINDOWS,
-                "download_url": ""
+                "download_url": "",
+                "addons_url": ""  # ADD
             }
 
         # DB-backed license keys
@@ -299,7 +328,8 @@ def license_activate(body: ActivateIn):
         return {
             "ok": True, "tier": tier, "token": token,
             "max_concurrent": cap,
-            "download_url": DOWNLOAD_URL_PRO if tier == "pro" else ""
+            "download_url": DOWNLOAD_URL_PRO if tier == "pro" else "",
+            "addons_url": ADDONS_URL if tier == "pro" else ""  # ADD
         }
 
     except HTTPException:
@@ -309,7 +339,7 @@ def license_activate(body: ActivateIn):
         _tb.print_exc()
         raise HTTPException(status_code=500, detail=f"activate_error: {e.__class__.__name__}: {e}")
 
-# --- ADD: /license/validate (startup token check) ---
+# --- /license/validate (startup token check) ---
 @app.post("/license/validate")
 def license_validate(body: ValidateIn):
     hwid = body.hwid.strip()
@@ -324,12 +354,13 @@ def license_validate(body: ValidateIn):
         return {
             "ok": True,
             "tier": tier,
-            "download_url": DOWNLOAD_URL_PRO if tier == "pro" else ""
+            "download_url": DOWNLOAD_URL_PRO if tier == "pro" else "",
+            "addons_url": ADDONS_URL if tier == "pro" else ""  # ADD
         }
 
-# --- ADD: admin token introspection (debug) ---
+# --- admin token introspection (debug) ---
 @app.post("/token/introspect")
-def token_introspect(body: IntrospectIn, request: Request, secret: Optional[str] = Query(None)):
+def token_introspect(body: IntrospectIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):  # ADD guard via Depends
     _require_admin(secret, request)
     tok = body.token.strip()
     want_hwid = (body.hwid or "").strip()
@@ -337,7 +368,11 @@ def token_introspect(body: IntrospectIn, request: Request, secret: Optional[str]
         row = con.execute("SELECT * FROM license_tokens WHERE token=?", (tok,)).fetchone()
         if not row:
             return {"ok": False, "reason": "unknown_token"}
-        exp = row["expires_at"]
+        exp_raw = row["expires_at"]
+        try:
+            exp = int(exp_raw) if exp_raw is not None else None
+        except Exception:
+            exp = None
         now_ts = now()
         ttl = None if exp is None else max(0, int(exp) - now_ts)
         out = {
@@ -369,9 +404,9 @@ def token_introspect(body: IntrospectIn, request: Request, secret: Optional[str]
             }
     return out
 
-# --- ADD: admin token revoke (optional) ---
+# --- admin token revoke ---
 @app.post("/token/revoke")
-def token_revoke(body: RevokeIn, request: Request, secret: Optional[str] = Query(None)):
+def token_revoke(body: RevokeIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):  # ADD guard via Depends
     _require_admin(secret, request)
     tok = body.token.strip()
     with closing(_db()) as con, con:
