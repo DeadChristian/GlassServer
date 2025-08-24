@@ -123,6 +123,14 @@ class ValidateIn(BaseModel):
 class VerifyIn(BaseModel):
     hwid: str = Field(min_length=1)
 
+# Admin tools
+class IntrospectIn(BaseModel):
+    token: str = Field(min_length=1)
+    hwid: Optional[str] = None
+
+class RevokeIn(BaseModel):
+    token: str = Field(min_length=1)
+
 # ----- Helpers -----
 def _set_user_tier(hwid: str, tier: str, max_windows: Optional[int] = None) -> None:
     with closing(_db()) as con, con:
@@ -295,12 +303,80 @@ def license_activate(body: ActivateIn):
         }
 
     except HTTPException:
-        # FastAPI errors pass through unchanged
         raise
     except Exception as e:
-        traceback.print_exc()
-        # Surface the exact reason to the client
+        import traceback as _tb
+        _tb.print_exc()
         raise HTTPException(status_code=500, detail=f"activate_error: {e.__class__.__name__}: {e}")
+
+# --- ADD: /license/validate (startup token check) ---
+@app.post("/license/validate")
+def license_validate(body: ValidateIn):
+    hwid = body.hwid.strip()
+    tok  = body.token.strip()
+    with closing(_db()) as con, con:
+        res = _validate_token(con, tok, hwid)
+        if not res.get("ok"):
+            # reasons: unknown_token / revoked / hwid_mismatch / expired
+            return {"ok": False, "reason": res.get("reason", "invalid")}
+        tier = res["tier"]
+        _set_user_tier(hwid, tier)
+        return {
+            "ok": True,
+            "tier": tier,
+            "download_url": DOWNLOAD_URL_PRO if tier == "pro" else ""
+        }
+
+# --- ADD: admin token introspection (debug) ---
+@app.post("/token/introspect")
+def token_introspect(body: IntrospectIn, request: Request, secret: Optional[str] = Query(None)):
+    _require_admin(secret, request)
+    tok = body.token.strip()
+    want_hwid = (body.hwid or "").strip()
+    with closing(_db()) as con:
+        row = con.execute("SELECT * FROM license_tokens WHERE token=?", (tok,)).fetchone()
+        if not row:
+            return {"ok": False, "reason": "unknown_token"}
+        exp = row["expires_at"]
+        now_ts = now()
+        ttl = None if exp is None else max(0, int(exp) - now_ts)
+        out = {
+            "ok": True,
+            "token": row["token"],
+            "tier": str(row["tier"] or "pro").lower(),
+            "hwid": row["hwid"],
+            "created_at": int(row["created_at"]),
+            "expires_at": (None if exp is None else int(exp)),
+            "ttl_seconds": ttl,
+            "revoked": bool(int(row["revoked"] or 0)),
+        }
+        if want_hwid:
+            out["hwid_match"] = (want_hwid == row["hwid"])
+        lk = row["license_key"]
+        if lk:
+            lic = con.execute(
+                "SELECT tier, max_concurrent, max_activations, revoked FROM licenses WHERE license_key=?",
+                (lk,)
+            ).fetchone()
+            out["license"] = {
+                "license_key_present": bool(lic),
+                **({} if not lic else {
+                    "tier": str(lic["tier"] or "pro").lower(),
+                    "max_concurrent": int(lic["max_concurrent"] or 0),
+                    "max_activations": int(lic["max_activations"] or 0),
+                    "revoked": bool(int(lic["revoked"] or 0)),
+                })
+            }
+    return out
+
+# --- ADD: admin token revoke (optional) ---
+@app.post("/token/revoke")
+def token_revoke(body: RevokeIn, request: Request, secret: Optional[str] = Query(None)):
+    _require_admin(secret, request)
+    tok = body.token.strip()
+    with closing(_db()) as con, con:
+        cur = con.execute("UPDATE license_tokens SET revoked=1 WHERE token=?", (tok,))
+        return {"ok": True, "updated": int(cur.rowcount)}
 
 @app.get("/admin/db-diag")
 def db_diag():
@@ -339,4 +415,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
-
