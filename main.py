@@ -4,14 +4,15 @@ import sqlite3
 import time
 import secrets
 import string
+import hmac, hashlib, json
 from contextlib import closing
 from typing import Optional, Dict, Any
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, Response, Query, Depends  # ADD: Depends
+from fastapi import FastAPI, HTTPException, Request, Response, Query, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 # ----- Env -----
@@ -20,7 +21,7 @@ DOWNLOAD_URL_PRO = os.getenv(
     "DOWNLOAD_URL_PRO",
     f"{DOMAIN}/static/GlassSetup.exe" if DOMAIN else ""
 )
-ADDONS_URL = os.getenv(  # ADD: expose addons URL
+ADDONS_URL = os.getenv(
     "ADDONS_URL",
     f"{DOMAIN}/static/pro_addons_v1.zip" if DOMAIN else ""
 )
@@ -31,7 +32,24 @@ FREE_MAX_WINDOWS = int(os.getenv("FREE_MAX_WINDOWS", "1"))
 STARTER_MAX_WINDOWS = int(os.getenv("STARTER_MAX_WINDOWS", "2"))
 PRO_MAX_WINDOWS = int(os.getenv("PRO_MAX_WINDOWS", "5"))
 PRO_BUY_URL = os.getenv("PRO_BUY_URL", "https://gumroad.com/l/xvphp").strip()
-APP_VERSION = os.getenv("APP_VERSION", "1.0.0")  # ADD: visible in FastAPI title
+APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
+
+# --- Gumroad + Email (auto-fulfillment) ---
+GUMROAD_WEBHOOK_SECRET = os.getenv("GUMROAD_WEBHOOK_SECRET", "").strip()
+GUMROAD_SELLER_ID      = os.getenv("GUMROAD_SELLER_ID", "").strip()
+# Optional product mapping (IDs or permalinks)
+GUMROAD_PRODUCT_PRO     = os.getenv("GUMROAD_PRODUCT_PRO", "").strip()
+GUMROAD_PRODUCT_STARTER = os.getenv("GUMROAD_PRODUCT_STARTER", "").strip()
+
+# Email choices: SendGrid (recommended) or SMTP fallback; else logs
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "").strip()
+MAIL_FROM        = os.getenv("MAIL_FROM", "support@glassapp.me").strip()
+
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASS = os.getenv("SMTP_PASS", "").strip()
+SMTP_TLS  = os.getenv("SMTP_TLS", "1") in ("1", "true", "True")
 
 now = lambda: int(time.time())
 
@@ -172,14 +190,14 @@ def _validate_token(con: sqlite3.Connection, token: str, hwid: str) -> Dict[str,
         return {"ok": False, "reason": "hwid_mismatch"}
     exp_raw = row["expires_at"]
     try:
-        exp = int(exp_raw) if exp_raw is not None else None  # HARDEN: coerce
+        exp = int(exp_raw) if exp_raw is not None else None
     except Exception:
         exp = None
     if exp is not None and now() > exp:
         return {"ok": False, "reason": "expired"}
     return {"ok": True, "tier": str(row["tier"] or "pro").lower()}
 
-# --- ADD: robust Bearer parsing + optional ?secret fallback ---
+# --- Bearer parsing + ?secret fallback ---
 def _extract_bearer(request: Request) -> Optional[str]:
     auth = request.headers.get("Authorization") or request.headers.get("authorization")
     if not auth:
@@ -198,6 +216,80 @@ def _require_admin(secret_qs: Optional[str], request: Request) -> None:
 
 def AdminGuard(request: Request, secret: Optional[str] = Query(None)):
     _require_admin(secret, request)
+
+# --- Email helpers ---
+def _email_plain(to_email: str, subject: str, body: str) -> None:
+    if not to_email:
+        return
+    # Prefer SendGrid if configured
+    if SENDGRID_API_KEY:
+        try:
+            # try requests, else urllib
+            try:
+                import requests
+                r = requests.post(
+                    "https://api.sendgrid.com/v3/mail/send",
+                    headers={
+                        "Authorization": f"Bearer {SENDGRID_API_KEY}",
+                        "Content-Type": "application/json"
+                    },
+                    data=json.dumps({
+                        "personalizations": [{"to": [{"email": to_email}]}],
+                        "from": {"email": MAIL_FROM, "name": "Glass"},
+                        "subject": subject,
+                        "content": [{"type": "text/plain", "value": body}]
+                    }),
+                    timeout=10
+                )
+                r.raise_for_status()
+                return
+            except ImportError:
+                import urllib.request
+                req = urllib.request.Request(
+                    "https://api.sendgrid.com/v3/mail/send",
+                    data=json.dumps({
+                        "personalizations": [{"to": [{"email": to_email}]}],
+                        "from": {"email": MAIL_FROM, "name": "Glass"},
+                        "subject": subject,
+                        "content": [{"type": "text/plain", "value": body}]
+                    }).encode("utf-8"),
+                    headers={
+                        "Authorization": f"Bearer {SENDGRID_API_KEY}",
+                        "Content-Type": "application/json"
+                    },
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=10) as _resp:
+                    _ = _resp.read()
+                return
+        except Exception as e:
+            print(f"[email] sendgrid_error: {e}")
+
+    # SMTP fallback
+    if SMTP_HOST and SMTP_USER and SMTP_PASS:
+        try:
+            import smtplib
+            from email.message import EmailMessage
+            msg = EmailMessage()
+            msg["Subject"] = subject
+            msg["From"] = MAIL_FROM
+            msg["To"] = to_email
+            msg.set_content(body)
+            if SMTP_TLS:
+                with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as s:
+                    s.starttls()
+                    s.login(SMTP_USER, SMTP_PASS)
+                    s.send_message(msg)
+            else:
+                with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as s:
+                    s.login(SMTP_USER, SMTP_PASS)
+                    s.send_message(msg)
+            return
+        except Exception as e:
+            print(f"[email] smtp_error: {e}")
+
+    # Last resort: just log it (no failure)
+    print(f"[EMAIL_DISABLED]\nTo: {to_email}\nSubj: {subject}\n{body}")
 
 # ----- Routes -----
 @app.get("/")
@@ -222,7 +314,6 @@ def public_config(response: Response):
         "intro_active": os.getenv("INTRO_ACTIVE", "1") in ("1","true","True"),
         "price_intro": os.getenv("PRICE_INTRO", "5"),
         "referrals_enabled": os.getenv("REFERRALS_ENABLED", "1") in ("1","true","True"),
-        # ADD: expose helpful links for debugging/clients
         "download_url_pro": DOWNLOAD_URL_PRO,
         "addons_url": ADDONS_URL,
         "launch_url": os.getenv("LAUNCH_URL", ""),
@@ -241,7 +332,7 @@ def static_list():
         return {"error": str(e)}
 
 @app.post("/license/issue")
-def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):  # ADD guard via Depends
+def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):
     _require_admin(secret, request)
     with closing(_db()) as con, con:
         _init_db()
@@ -255,7 +346,6 @@ def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query
 
 @app.post("/license/activate")
 def license_activate(body: ActivateIn):
-    import traceback
     try:
         hwid = body.hwid.strip()
         key  = body.key.strip().upper()
@@ -271,7 +361,7 @@ def license_activate(body: ActivateIn):
                 "ok": True, "tier": tier, "token": token,
                 "max_concurrent": PRO_MAX_WINDOWS,
                 "download_url": DOWNLOAD_URL_PRO,
-                "addons_url": ADDONS_URL  # ADD
+                "addons_url": ADDONS_URL
             }
 
         if key.startswith("START"):
@@ -283,7 +373,7 @@ def license_activate(body: ActivateIn):
                 "ok": True, "tier": tier, "token": token,
                 "max_concurrent": STARTER_MAX_WINDOWS,
                 "download_url": "",
-                "addons_url": ""  # ADD
+                "addons_url": ""
             }
 
         # DB-backed license keys
@@ -329,17 +419,14 @@ def license_activate(body: ActivateIn):
             "ok": True, "tier": tier, "token": token,
             "max_concurrent": cap,
             "download_url": DOWNLOAD_URL_PRO if tier == "pro" else "",
-            "addons_url": ADDONS_URL if tier == "pro" else ""  # ADD
+            "addons_url": ADDONS_URL if tier == "pro" else ""
         }
 
     except HTTPException:
         raise
     except Exception as e:
-        import traceback as _tb
-        _tb.print_exc()
         raise HTTPException(status_code=500, detail=f"activate_error: {e.__class__.__name__}: {e}")
 
-# --- /license/validate (startup token check) ---
 @app.post("/license/validate")
 def license_validate(body: ValidateIn):
     hwid = body.hwid.strip()
@@ -347,7 +434,6 @@ def license_validate(body: ValidateIn):
     with closing(_db()) as con, con:
         res = _validate_token(con, tok, hwid)
         if not res.get("ok"):
-            # reasons: unknown_token / revoked / hwid_mismatch / expired
             return {"ok": False, "reason": res.get("reason", "invalid")}
         tier = res["tier"]
         _set_user_tier(hwid, tier)
@@ -355,12 +441,12 @@ def license_validate(body: ValidateIn):
             "ok": True,
             "tier": tier,
             "download_url": DOWNLOAD_URL_PRO if tier == "pro" else "",
-            "addons_url": ADDONS_URL if tier == "pro" else ""  # ADD
+            "addons_url": ADDONS_URL if tier == "pro" else ""
         }
 
-# --- admin token introspection (debug) ---
+# --- Admin token introspection / revoke ---
 @app.post("/token/introspect")
-def token_introspect(body: IntrospectIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):  # ADD guard via Depends
+def token_introspect(body: IntrospectIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):
     _require_admin(secret, request)
     tok = body.token.strip()
     want_hwid = (body.hwid or "").strip()
@@ -404,20 +490,69 @@ def token_introspect(body: IntrospectIn, request: Request, secret: Optional[str]
             }
     return out
 
-# --- admin token revoke ---
 @app.post("/token/revoke")
-def token_revoke(body: RevokeIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):  # ADD guard via Depends
+def token_revoke(body: RevokeIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):
     _require_admin(secret, request)
     tok = body.token.strip()
     with closing(_db()) as con, con:
         cur = con.execute("UPDATE license_tokens SET revoked=1 WHERE token=?", (tok,))
         return {"ok": True, "updated": int(cur.rowcount)}
 
+# ----- Gumroad webhook: auto-issue + email -----
+def _gum_tier_for(product_id: str) -> str:
+    pid = (product_id or "").strip()
+    if GUMROAD_PRODUCT_STARTER and pid == GUMROAD_PRODUCT_STARTER:
+        return "starter"
+    return "pro"
+
+@app.post("/gumroad/webhook")
+async def gumroad_webhook(request: Request):
+    if not GUMROAD_WEBHOOK_SECRET:
+        raise HTTPException(status_code=500, detail="Webhook not configured")
+
+    raw = await request.body()
+    sig = request.headers.get("X-Gumroad-Signature") or request.headers.get("x-gumroad-signature") or ""
+    mac = hmac.new(GUMROAD_WEBHOOK_SECRET.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, mac):
+        raise HTTPException(status_code=401, detail="Bad signature")
+
+    form = await request.form()
+    seller_id   = str(form.get("seller_id") or "")
+    email       = str(form.get("email") or form.get("purchaser_email") or "").strip().lower()
+    product_id  = str(form.get("product_id") or form.get("product_permalink") or "")
+    purchase_id = str(form.get("sale_id") or form.get("purchase_id") or "")
+
+    if GUMROAD_SELLER_ID and seller_id and seller_id != GUMROAD_SELLER_ID:
+        raise HTTPException(status_code=403, detail="Wrong seller")
+
+    tier = _gum_tier_for(product_id)
+    maxc = PRO_MAX_WINDOWS if tier == "pro" else (STARTER_MAX_WINDOWS if tier == "starter" else FREE_MAX_WINDOWS)
+
+    # Issue a license record; activation happens later on the buyer's PC
+    key = _make_key("GL")
+    with closing(_db()) as con, con:
+        con.execute(
+            "INSERT OR IGNORE INTO licenses (license_key, buyer_email, tier, max_concurrent, max_activations, revoked) VALUES (?,?,?,?,?,0)",
+            (key, email, tier, maxc, 3)
+        )
+
+    # Email buyer (or log if email not configured)
+    if email:
+        instructions = (
+            f"Thanks for buying Glass {tier.title()}!\n\n"
+            f"Download: {DOWNLOAD_URL_PRO or (DOMAIN + '/static/GlassSetup.exe')}\n"
+            f"Your license key: {key}\n\n"
+            f"Activate: Open Glass -> Pro -> Enter license…\n"
+            f"Pro gives you up to {maxc} active windows, Ghost Clicks, and Topmost.\n\n"
+            f"If you need help, reply to this email."
+        )
+        _email_plain(email, "Your Glass license key", instructions)
+
+    return JSONResponse({"ok": True, "tier": tier, "key": key, "email": email, "purchase_id": purchase_id})
+
 @app.get("/admin/db-diag")
 def db_diag():
-    import os, traceback
     try:
-        # basic write test
         with closing(_db()) as con, con:
             con.execute("CREATE TABLE IF NOT EXISTS _diag (k TEXT PRIMARY KEY, v TEXT)")
             con.execute("INSERT OR REPLACE INTO _diag(k,v) VALUES (?,?)", ("ts", str(int(time.time()))))
@@ -428,7 +563,6 @@ def db_diag():
             "rows_in_diag": int(row["c"])
         }
     except Exception as e:
-        traceback.print_exc()
         return {"db_path": os.path.abspath(DB_PATH), "writable": False, "error": f"{e.__class__.__name__}: {e}"}
 
 @app.post("/verify")
