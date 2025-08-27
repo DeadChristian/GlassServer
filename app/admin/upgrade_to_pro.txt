@@ -1,0 +1,12 @@
+from utils import unsign_action
+from fastapi import Query
+
+@app.get("/admin/upgrade-to-pro")
+async def public_upgrade(hwid: str, token: str):
+    # token was created with sign_action(ADMIN_SECRET, "pro-upgrade")
+    msg = unsign_action(os.getenv("ADMIN_SECRET",""), token, max_age=3600*24)
+    if msg != "pro-upgrade":
+        raise HTTPException(401, "Bad token")
+    ensure_device(hwid)
+    set_tier(hwid, "pro")
+    return {"ok": True, "hwid": hwid, "tier": "pro"}

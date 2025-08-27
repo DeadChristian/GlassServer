@@ -1,0 +1,22 @@
+﻿from __future__ import annotations
+import json, time
+from urllib.request import Request, urlopen
+def _fetch_json(method: str, url: str, payload: dict|None, timeout: float) -> dict:
+    data = json.dumps(payload).encode() if payload is not None else None
+    headers = {"User-Agent":"Glass/1.0","Accept":"application/json"}
+    if data: headers["Content-Type"]="application/json"
+    with urlopen(Request(url, data=data, method=method, headers=headers), timeout=timeout) as r:
+        b = r.read()
+    return json.loads(b.decode()) if b else {}
+def get_json(url: str, timeout: float=4.0, retries: int=0) -> dict:
+    err=None
+    for _ in range(retries+1):
+        try: return _fetch_json("GET", url, None, timeout)
+        except Exception as e: err=e; time.sleep(0.2)
+    raise err
+def post_json(url: str, payload: dict, timeout: float=4.5, retries: int=0) -> dict:
+    err=None
+    for _ in range(retries+1):
+        try: return _fetch_json("POST", url, payload, timeout)
+        except Exception as e: err=e; time.sleep(0.2)
+    raise err

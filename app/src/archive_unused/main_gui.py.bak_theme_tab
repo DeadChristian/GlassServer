@@ -1,0 +1,828 @@
+﻿# main_gui.py — Glass v1 (hardened)
+from __future__ import annotations
+import json, os, threading, webbrowser, atexit, sys, traceback
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
+import tkinter as tk
+from tkinter import ttk, simpledialog, messagebox, filedialog
+
+# ---- optional imports with fallbacks ----------------------------------------
+try:
+    from theme_designer import open_theme_designer_dialog  # optional
+except Exception:
+    def open_theme_designer_dialog(*a, **k):
+        messagebox.showinfo("Theme Designer", "Theme Designer module not available.")
+
+try:
+    from theme import set_theme, available_themes, get_theme_tokens
+except Exception:
+    # minimal fallbacks
+    def set_theme(root, name): pass
+    def available_themes(): return ["Mint Recall"]
+    def get_theme_tokens(_): return {"accent": "#ffffff"}
+
+try:
+    import winreg
+    HAVE_WINREG = True
+except Exception:
+    HAVE_WINREG = False
+
+APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
+DEFAULT_DOMAIN = "https://www.glassapp.me"
+DOMAIN = os.getenv("GLASS_DOMAIN") or os.getenv("DOMAIN") or DEFAULT_DOMAIN
+
+ACCENT = "#22e38a"
+BG = "#0b0f10"
+MRU_MAX = 5
+FALLBACK_SETTINGS_PATH = Path.home() / ".glass_settings.json"
+
+# core helpers (safe fallbacks)
+try:
+    from core.transparency import apply_external  # type: ignore
+except Exception:
+    def apply_external(title: str, opacity: int, pin: bool) -> bool:
+        return True
+
+try:
+    from core import settings as core_settings  # type: ignore
+    HAVE_CORE_SETTINGS = True
+except Exception:
+    HAVE_CORE_SETTINGS = False
+
+try:
+    from core.window_utils import refresh_window_list as core_refresh_windows  # type: ignore
+except Exception:
+    core_refresh_windows = None
+
+# helpers (safe fallbacks)
+try:
+    from globe_widget import create_globe
+except Exception:
+    def create_globe(parent, size=56, speed=1.0, accent_color="#ffffff", assets_dir=None, tilt_deg=23.0):
+        f = tk.Frame(parent, width=size, height=size, bg=parent.cget("bg"))
+        f.start = lambda: None
+        f.stop = lambda: None
+        f.widget = f
+        return f
+
+def _resource_path(rel: str) -> str:
+    try:
+        from paths import resource_path
+        return resource_path(rel)
+    except Exception:
+        here = Path(__file__).parent
+        return str((here / rel).resolve())
+
+try:
+    from net import get_json, post_json
+except Exception:
+    # offline-safe stubs
+    def get_json(url, timeout=4.0, retries=0): return {}
+    def post_json(url, payload, timeout=4.0, retries=0): return {}
+
+try:
+    from hwid import get_hwid
+except Exception:
+    import uuid
+    def get_hwid() -> str:
+        return "HW-" + uuid.getnode().to_bytes(6, "big").hex().upper()
+
+# ---------- persistence ----------
+def _fallback_settings_load() -> Dict[str, Any]:
+    if FALLBACK_SETTINGS_PATH.exists():
+        try:
+            return json.loads(FALLBACK_SETTINGS_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+def _fallback_settings_save(data: Dict[str, Any]) -> None:
+    try:
+        FALLBACK_SETTINGS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+def settings_load() -> Dict[str, Any]:
+    if HAVE_CORE_SETTINGS:
+        try:
+            return core_settings.load()  # type: ignore
+        except Exception:
+            return _fallback_settings_load()
+    return _fallback_settings_load()
+
+def settings_save(data: Dict[str, Any]) -> None:
+    if HAVE_CORE_SETTINGS:
+        try:
+            core_settings.save(data)  # type: ignore
+            return
+        except Exception:
+            _fallback_settings_save(data); return
+    _fallback_settings_save(data)
+
+# ---------- windows enumeration ----------
+def _enum_windows_titles() -> List[str]:
+    titles: List[str] = []
+    try:
+        import ctypes
+        EnumWindows = ctypes.windll.user32.EnumWindows
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+        GetWindowText = ctypes.windll.user32.GetWindowTextW
+        GetWindowTextLength = ctypes.windll.user32.GetWindowTextLengthW
+        IsWindowVisible = ctypes.windll.user32.IsWindowVisible
+        def foreach(hwnd, lParam):
+            if IsWindowVisible(hwnd):
+                length = GetWindowTextLength(hwnd)
+                if length > 0:
+                    buff = ctypes.create_unicode_buffer(length + 1)
+                    GetWindowText(hwnd, buff, length + 1)
+                    t = buff.value.strip()
+                    if t: titles.append(t)
+            return True
+        EnumWindows(EnumWindowsProc(foreach), 0)
+    except Exception:
+        pass
+    seen: Set[str] = set(); uniq: List[str] = []
+    for t in titles:
+        if t not in seen:
+            uniq.append(t); seen.add(t)
+    return uniq or ["Desktop"]
+
+def refresh_window_list() -> List[str]:
+    if core_refresh_windows:
+        try:
+            names = core_refresh_windows()  # type: ignore
+            return list(dict.fromkeys([n for n in names if n])) or ["Desktop"]
+        except Exception:
+            return _enum_windows_titles()
+    return _enum_windows_titles()
+
+# ---------- tiers ----------
+@dataclass
+class TierInfo:
+    name: str = "Free Trial"
+    max_windows: int = 1
+    ref_code: Optional[str] = None
+
+class Toasts:
+    def __init__(self, label: ttk.Label, clear_ms: int = 3500):
+        self.label = label
+        self.clear_ms = clear_ms
+        self._clear_after_id: Optional[str] = None
+    def show(self, msg: str, level: str = "ok"):
+        prefix = {"ok": "✓", "warn": "⚠", "err": "✖"}.get(level, "•")
+        self.label.config(text=f"{prefix} {msg}")
+        if self._clear_after_id:
+            try: self.label.after_cancel(self._clear_after_id)
+            except Exception: pass
+        self._clear_after_id = self.label.after(self.clear_ms, self.clear)
+    def clear(self):
+        self.label.config(text="")
+
+def _infer_tier(server: Dict[str, Any]) -> TierInfo:
+    ref_code = server.get("ref_code")
+    tier_raw = str(server.get("tier", "")).strip().lower()
+    cap_raw = server.get("max_windows")
+    try:
+        cap_int = int(cap_raw)
+        if cap_int > 0:
+            name = "Pro" if tier_raw == "pro" else "Starter" if tier_raw == "starter" else "Free Trial"
+            return TierInfo(name=name, max_windows=max(1, cap_int), ref_code=ref_code)
+    except Exception:
+        pass
+    if tier_raw == "starter":
+        return TierInfo(name="Starter", max_windows=2, ref_code=ref_code)
+    if tier_raw == "pro":
+        return TierInfo(name="Pro", max_windows=5, ref_code=ref_code)
+    return TierInfo(name="Free Trial", max_windows=1, ref_code=ref_code)
+
+# ---------- app ----------
+class GlassApp(tk.Tk):
+    # Windows startup helpers
+    def _startup_supported(self) -> bool:
+        return sys.platform.startswith("win") and HAVE_WINREG
+    def _startup_is_enabled(self) -> bool:
+        if not self._startup_supported(): return False
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ) as k:
+                winreg.QueryValueEx(k, "Glass"); return True
+        except FileNotFoundError:
+            return False
+        except Exception:
+            return False
+    def _startup_set(self, enabled: bool) -> bool:
+        if not self._startup_supported(): return False
+        if not getattr(sys, "frozen", False):
+            raise RuntimeError("Build the EXE with PyInstaller to enable startup")
+        try:
+            keypath = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            k = winreg.CreateKey(winreg.HKEY_CURRENT_USER, keypath)
+            if enabled:
+                exe = sys.executable  # Glass.exe when frozen
+                winreg.SetValueEx(k, "Glass", 0, winreg.REG_SZ, f'"{exe}"')
+            else:
+                try: winreg.DeleteValue(k, "Glass")
+                except FileNotFoundError: pass
+            winreg.CloseKey(k)
+            return True
+        except Exception:
+            return False
+
+    def __init__(self):
+        super().__init__()
+        # Icon + fonts
+        try:
+            self.iconbitmap(_resource_path("assets/icon.ico"))
+        except Exception:
+            pass
+        import tkinter.font as tkfont
+        try:
+            self.call('tk', 'scaling', 1.0)
+            tkfont.nametofont("TkDefaultFont").configure(family="Segoe UI", size=10)
+            tkfont.nametofont("TkTextFont").configure(family="Segoe UI", size=10)
+            tkfont.nametofont("TkHeadingFont").configure(family="Segoe UI", size=16, weight="bold")
+        except Exception:
+            pass
+
+        self.title("Glass")
+        self.configure(bg=BG)
+        self.minsize(720, 520)
+        self.geometry("820x580+120+80")
+
+        # theme
+        self.current_theme = "Mint Recall"
+        set_theme(self, self.current_theme)
+
+        # state
+        self.hwid = get_hwid()
+        self.tier = TierInfo()
+        self.public_config: Dict[str, Any] = {
+            "starter_sales_enabled": True, "starter_price": "5", "starter_buy_url": f"{DOMAIN}/buy?tier=starter",
+            "pro_sales_enabled": True,     "pro_price": "9.99", "pro_buy_url": f"{DOMAIN}/buy?tier=pro",
+            "intro_active": False, "price_intro": "5", "referrals_enabled": False
+        }
+
+        s = settings_load()
+        self._recent_targets: List[str] = s.get("_recent_targets", [])
+        self._last_config: Dict[str, Any] = s.get("_last_config", {})
+        last_state: Dict[str, Any] = s.get("_last_state", {})
+
+        self.last_selected = last_state.get("last_selected", "")
+        self.last_opacity  = int(last_state.get("last_opacity", 85))
+        self.last_pin      = bool(last_state.get("last_pin", False))
+        self.current_theme = last_state.get("theme", self.current_theme)
+        self.compact_mode  = bool(last_state.get("compact", False))
+        self.applied_targets: Set[str] = set(last_state.get("applied_targets", []))
+        self.about_photo_path = last_state.get("about_photo", "")
+        self.pause_anim   = bool(last_state.get("pause_anim", False))
+        self.run_at_startup = bool(last_state.get("run_at_startup", False))
+        if self._startup_supported() and getattr(sys, "frozen", False):
+            self.run_at_startup = self._startup_is_enabled()
+
+        # layout
+        self.columnconfigure(0, weight=1); self.rowconfigure(1, weight=1)
+        self.header = tk.Frame(self, bg=self.cget("bg"), highlightthickness=1, highlightbackground="#14181b")
+        self.header.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8)); self.header.columnconfigure(0, weight=1)
+        self.body = ttk.Frame(self); self.body.grid(row=1, column=0, sticky="nsew", padx=12, pady=8)
+        self.body.columnconfigure(0, weight=1); self.body.columnconfigure(1, weight=1); self.body.rowconfigure(0, weight=1)
+        self.footer = ttk.Frame(self); self.footer.grid(row=2, column=0, sticky="ew", padx=12, pady=(4, 10))
+
+        set_theme(self, self.current_theme)
+
+        # build UI
+        self._build_header()
+        self.left_col = ttk.Labelframe(self.body, text="Target Window & Settings")
+        self.left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 8)); self.left_col.columnconfigure(0, weight=1)
+        self.right_col = ttk.Frame(self.body); self.right_col.grid(row=0, column=1, sticky="nsew", padx=(8, 0)); self.right_col.columnconfigure(0, weight=1)
+        self._build_left(); self._build_right()
+
+        self.status_label = ttk.Label(self.footer, text="", style="Status.TLabel"); self.status_label.pack(side="left", fill="x", expand=True)
+        self.toasts = Toasts(self.status_label)
+
+        # behavior
+        self._bind_shortcuts()
+        self._populate_windows()
+        self._load_config_and_tier_async()
+
+        # restore controls
+        if self.last_selected: self.cb_windows.set(self.last_selected)
+        self.var_opacity.set(self.last_opacity); self.lbl_opacity.config(text=f"{self.last_opacity}%")
+        self.var_pin.set(self.last_pin)
+        self.var_compact.set(self.compact_mode)
+        if self.compact_mode: self._toggle_compact()
+
+        # lifecycle
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        atexit.register(self._persist_state_silent)
+        self.bind("<FocusIn>",  lambda e: self._on_focus(True))
+        self.bind("<FocusOut>", lambda e: self._on_focus(False))
+
+    # -- header ----------------------------------------------------------------
+    def _build_header(self):
+        title   = ttk.Label(self.header, text="Glass", style="Header.TLabel")
+        version = ttk.Label(self.header, text=f"v{APP_VERSION}", style="Subtle.TLabel")
+        self.badge = ttk.Label(self.header, text=self._badge_text(), style="Badge.TLabel", cursor="hand2")
+        self.badge.bind("<Button-1>", lambda e: self._on_badge_click())
+        title.grid(row=0, column=0, sticky="w"); version.grid(row=0, column=0, sticky="e", padx=(0, 146))
+        self.badge.grid(row=1, column=0, sticky="w", pady=(2, 0))
+
+        # tilted globe (accent will be recolored by theme)
+        assets_dir = Path(_resource_path("assets"))
+        acc0 = get_theme_tokens(self.current_theme).get("accent", "#ffffff")
+        self.globe = create_globe(self.header, size=56, speed=1.0, accent_color=acc0, assets_dir=assets_dir, tilt_deg=23.0)
+        self.globe.widget.place(relx=1.0, rely=0.0, x=-8, y=-2, anchor="ne")
+        self.globe.widget.bind("<Button-1>", lambda e: self._open_url(f"{DOMAIN}/launch"))
+        if not self.pause_anim:
+            try: self.after(50, self.globe.start)
+            except Exception: pass
+
+    # -- left / right panels ---------------------------------------------------
+    def _build_left(self):
+        pad = {"padx": 10, "pady": 8}; row = 0
+        ttk.Label(self.left_col, text="Active windows:", style="Subtle.TLabel").grid(row=row, column=0, sticky="w", **pad); row += 1
+        rowf = ttk.Frame(self.left_col); rowf.grid(row=row, column=0, sticky="ew", **pad); rowf.columnconfigure(0, weight=1)
+        self.cb_windows = ttk.Combobox(rowf, state="readonly", values=[]); self.cb_windows.grid(row=0, column=0, sticky="ew")
+        ttk.Button(rowf, text="Refresh (F5)", command=self._populate_windows).grid(row=0, column=1, padx=(8, 0)); row += 1
+
+        ttk.Label(self.left_col, text="Recent targets:", style="Subtle.TLabel").grid(row=row, column=0, sticky="w", **pad); row += 1
+        self.cb_recent = ttk.Combobox(self.left_col, values=self._recent_targets, state="readonly")
+        self.cb_recent.grid(row=row, column=0, sticky="ew", **pad)
+        self.cb_recent.bind("<<ComboboxSelected>>", lambda e: self._select_recent()); row += 1
+
+        self.var_opacity = tk.IntVar(value=85)
+        scale_f = ttk.Frame(self.left_col); scale_f.grid(row=row, column=0, sticky="ew", **pad); scale_f.columnconfigure(0, weight=1)
+        ttk.Label(scale_f, text="Opacity:", style="Subtle.TLabel").grid(row=0, column=0, sticky="w")
+        self.lbl_opacity = ttk.Label(scale_f, text=f"{self.var_opacity.get()}%"); self.lbl_opacity.grid(row=0, column=1, sticky="e")
+        self.scale_opacity = ttk.Scale(self.left_col, from_=20, to=100, orient="horizontal",
+                                       command=self._on_opacity_change, value=self.var_opacity.get())
+        self.scale_opacity.grid(row=row+1, column=0, sticky="ew", padx=10); row += 2
+
+        self.var_pin = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self.left_col, text="Pin to back", variable=self.var_pin).grid(row=row, column=0, sticky="w", **pad); row += 1
+
+        ttk.Button(self.left_col, text="Apply to target", style="Accent.TButton", command=self._apply_to_target)\
+            .grid(row=row, column=0, sticky="ew", padx=10, pady=(8, 12))
+
+    def _build_right(self):
+        app_group = ttk.Labelframe(self.right_col, text="App")
+        app_group.grid(row=0, column=0, sticky="ew", pady=(0, 8)); app_group.columnconfigure(0, weight=1)
+
+        self.row_starter = ttk.Frame(app_group); self.row_starter.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 2)); self.row_starter.columnconfigure(0, weight=1)
+        self.btn_buy_starter = ttk.Button(self.row_starter, text="Buy Starter (2 windows) – $5", style="Accent.TButton", command=self._buy_starter)
+        self.btn_buy_starter.grid(row=0, column=0, sticky="ew")
+        self.lbl_starter = ttk.Label(self.row_starter, text="", style="Subtle.TLabel"); self.lbl_starter.grid(row=1, column=0, sticky="w", pady=(2,0))
+
+        self.row_pro = ttk.Frame(app_group); self.row_pro.grid(row=1, column=0, sticky="ew", padx=10, pady=(6, 4)); self.row_pro.columnconfigure(0, weight=1)
+        self.btn_buy_pro = ttk.Button(self.row_pro, text="Buy Pro", command=self._buy_pro)
+        self.btn_buy_pro.grid(row=0, column=0, sticky="ew")
+        self.lbl_pro = ttk.Label(self.row_pro, text="$9.99", style="Subtle.TLabel"); self.lbl_pro.grid(row=1, column=0, sticky="w", pady=(2,0))
+
+        act_row = ttk.Frame(app_group); act_row.grid(row=2, column=0, sticky="ew", padx=10, pady=6); act_row.columnconfigure(0, weight=1)
+        ttk.Button(act_row, text="Enter license…", command=self._enter_license).grid(row=0, column=0, sticky="w")
+        ttk.Button(act_row, text="Refresh license", command=self._refresh_license).grid(row=0, column=1, padx=(8, 0))
+
+        presets = ttk.Frame(app_group); presets.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 6))
+        ttk.Label(presets, text="Opacity presets:", style="Subtle.TLabel").pack(side="left")
+        for pct in (30, 50, 70, 90, 100):
+            ttk.Button(presets, text=f"{pct}%", width=4, command=lambda p=pct: self._set_opacity_preset(p)).pack(side="left", padx=(6,0))
+
+        toggles = ttk.Frame(app_group); toggles.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 6))
+        self.var_pause_anim = tk.BooleanVar(value=self.pause_anim)
+        ttk.Checkbutton(toggles, text="Pause header animation", variable=self.var_pause_anim, command=self._on_pause_toggle).pack(side="left")
+        self.var_startup = tk.BooleanVar(value=self.run_at_startup)
+        ttk.Checkbutton(toggles, text="Launch at Windows startup", variable=self.var_startup, command=self._on_startup_toggle).pack(side="left", padx=(16,0))
+
+        diag = ttk.Frame(app_group); diag.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 10))
+        ttk.Button(diag, text="Copy diagnostics", command=self._copy_diag).pack(side="left")
+
+        nice = ttk.Labelframe(self.right_col, text="Nice to have")
+        nice.grid(row=1, column=0, sticky="ew", pady=(0, 8)); nice.columnconfigure(0, weight=1)
+        row = ttk.Frame(nice); row.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 10))
+        ttk.Button(row, text="Export settings", command=self._export_settings).pack(side="left")
+        ttk.Button(row, text="Import settings", command=self._import_settings).pack(side="left", padx=(8,0))
+        ttk.Button(row, text="Reset defaults", command=self._reset_defaults).pack(side="left", padx=(8,0))
+
+        theme_group = ttk.Labelframe(self.right_col, text="Theme & Layout")
+        theme_group.grid(row=2, column=0, sticky="ew", pady=(0, 8)); theme_group.columnconfigure(0, weight=1)
+        theme_row = ttk.Frame(theme_group); theme_row.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+        ttk.Label(theme_row, text="Theme:", style="Subtle.TLabel").pack(side="left")
+        self.var_theme = tk.StringVar(value=self.current_theme)
+        self.cb_theme = ttk.Combobox(theme_row, values=available_themes(), textvariable=self.var_theme, state="readonly", width=18)
+        self.cb_theme.pack(side="left", padx=(8, 0))
+        self.cb_theme.bind("<<ComboboxSelected>>", lambda e: self._apply_theme(self.var_theme.get()))
+        ttk.Button(theme_group, text="Theme Designer…", command=self._open_theme_designer).grid(row=0, column=1, padx=(10,0))
+
+        self.var_compact = tk.BooleanVar(value=self.compact_mode)
+        ttk.Checkbutton(theme_group, text="Compact mode", variable=self.var_compact, command=self._toggle_compact)\
+            .grid(row=1, column=0, sticky="w", padx=10, pady=(2, 4))
+
+        help_group = ttk.Labelframe(self.right_col, text="Help")
+        help_group.grid(row=3, column=0, sticky="ew", pady=(0, 8)); help_group.columnconfigure(0, weight=1)
+        help_row1 = ttk.Frame(help_group); help_row1.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 6)); help_row1.columnconfigure(0, weight=1)
+        ttk.Button(help_row1, text="Help / Launch", command=lambda: self._open_url(f"{DOMAIN}/launch")).grid(row=0, column=0, sticky="ew")
+        ttk.Button(help_row1, text="Privacy", command=lambda: self._open_url(f"{DOMAIN}/privacy")).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(help_row1, text="Terms", command=lambda: self._open_url(f"{DOMAIN}/terms")).grid(row=0, column=2, padx=(8, 0))
+        help_row2 = ttk.Frame(help_group); help_row2.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        ttk.Button(help_row2, text="Hotkeys…", command=self._show_hotkeys).grid(row=0, column=0, sticky="w")
+        ttk.Button(help_row2, text="About…", command=self._show_about).grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+    # -- events / actions -------------------------------------------------------
+    def _on_focus(self, focused: bool):
+        try:
+            if focused and not getattr(self, "pause_anim", False): self.globe.start()
+            else: self.globe.stop()
+        except Exception:
+            pass
+
+    def _on_opacity_change(self, _):
+        val = int(float(self.scale_opacity.get()))
+        self.var_opacity.set(val); self.lbl_opacity.config(text=f"{val}%")
+
+    def _populate_windows(self):
+        names = refresh_window_list()
+        self.cb_windows["values"] = names
+        if names:
+            if self.last_selected in names: self.cb_windows.set(self.last_selected)
+            else: self.cb_windows.set(names[0])
+        self.toasts.show("Window list refreshed.", "ok")
+
+    def _select_recent(self):
+        t = self.cb_recent.get().strip()
+        if t: self.cb_windows.set(t)
+
+    def _apply_to_target(self):
+        title = (self.cb_windows.get() or "").strip()
+        if not title:
+            self.toasts.show("Pick a window first.", "warn"); return
+
+        already = title in self.applied_targets
+        if not already and len(self.applied_targets) >= int(self.tier.max_windows):
+            if self.tier.name == "Free Trial":
+                self.toasts.show("Free allows 1. Buy Starter (2 windows) for .", "warn")
+            elif self.tier.name == "Starter":
+                self.toasts.show("Starter allows 2. Pro unlocks more.", "warn")
+            else:
+                self.toasts.show("Limit reached.", "warn")
+            return
+
+        opacity = int(self.var_opacity.get()); pin = bool(self.var_pin.get())
+        try: ok = apply_external(title, opacity, pin)
+        except Exception: ok = False
+
+        if ok:
+            self._push_mru(title)
+            self.applied_targets.add(title)
+            self._persist_state()
+            self.toasts.show("Applied to target.", "ok")
+            if len(self.applied_targets) >= 6:
+                self.toasts.show("Heads-up: heavy transparency can cause screen tearing on some GPUs.", "warn")
+        else:
+            self.toasts.show("Failed to apply to target.", "err")
+
+    def _clear_applied_history(self):
+        self.applied_targets.clear()
+        self._persist_state()
+        self.toasts.show("Applied history cleared.", "ok")
+
+    def _push_mru(self, title: str):
+        if title in self._recent_targets: self._recent_targets.remove(title)
+        self._recent_targets.insert(0, title)
+        self._recent_targets = self._recent_targets[:MRU_MAX]
+        self.cb_recent["values"] = self._recent_targets
+        d = settings_load(); d["_recent_targets"] = self._recent_targets; settings_save(d)
+        self.last_selected = title
+
+    def _buy_starter(self):
+        url = self.public_config.get("starter_buy_url") or f"{DOMAIN}/buy?tier=starter"
+        self._open_url(url)
+    def _buy_pro(self):
+        url = self.public_config.get("pro_buy_url") or f"{DOMAIN}/buy?tier=pro"
+        self._open_url(url)
+
+    def _enter_license(self):
+        key = simpledialog.askstring("Enter license", "Paste your license key:", parent=self)
+        if not key: return
+        def worker():
+            payload = {"hwid": self.hwid, "key": key.strip()}
+            try:
+                post_json(f"{DOMAIN}/license/activate", payload, timeout=6.0, retries=1)
+                self.toasts.show("Unlocked! Restart not required.", "ok")
+                self._verify_tier_async()
+            except Exception:
+                self.toasts.show("Activation failed (offline or invalid).", "err")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _refresh_license(self):
+        self._verify_tier_async()
+
+    def _badge_text(self) -> str:
+        cap = "∞" if self.tier.max_windows >= 9999 else str(self.tier.max_windows)
+        label = {"Free Trial": "Free", "Starter": "Starter", "Pro": "Pro"}.get(self.tier.name, self.tier.name)
+        return f"{label} ({cap})"
+
+    def _on_badge_click(self):
+        messagebox.showinfo("Tier details",
+            f"Tier: {self.tier.name}\nMax windows: {('∞' if self.tier.max_windows>=9999 else self.tier.max_windows)}\n\n"
+            "Note: High transparency counts may cause screen tearing on some GPUs."
+        )
+
+    def _open_url(self, url: str):
+        try: webbrowser.open_new_tab(url)
+        except Exception: pass
+
+    def _apply_theme(self, name: str):
+        self.current_theme = name
+        set_theme(self, name)
+        try:
+            acc = get_theme_tokens(name).get("accent", "#ffffff")
+            if hasattr(self.globe, "set_accent"):
+                self.globe.set_accent(acc)
+        except Exception:
+            pass
+        self._persist_state()
+
+    def _open_theme_designer(self):
+        def _saved(name: str, names_list):
+            try: self.cb_theme["values"] = names_list
+            except Exception:
+                self.cb_theme["values"] = available_themes()
+            self.var_theme.set(name)
+            self._apply_theme(name)
+        open_theme_designer_dialog(self, self.current_theme, on_saved=_saved)
+
+    def _toggle_compact(self):
+        if self.var_compact.get():
+            self.minsize(520, 420); self.geometry("560x460")
+        else:
+            self.minsize(720, 520); self.geometry("820x580")
+        self._persist_state()
+
+    def _bind_shortcuts(self):
+        self.bind("<F5>", lambda e: self._populate_windows())
+        self.bind("<Control-b>", lambda e: self._buy_pro()); self.bind("<Control-B>", lambda e: self._buy_pro())
+        self.bind("<Control-s>", lambda e: self._buy_starter()); self.bind("<Control-S>", lambda e: self._buy_starter())
+        self.bind("<Control-p>", lambda e: (self.var_pause_anim.set(not self.var_pause_anim.get()), self._on_pause_toggle()))
+        self.bind("<Control-P>", lambda e: (self.var_pause_anim.set(not self.var_pause_anim.get()), self._on_pause_toggle()))
+
+    def _show_hotkeys(self):
+        messagebox.showinfo("Hotkeys",
+            "F5: Refresh windows\n"
+            "Ctrl+S: Buy Starter (2 windows)\n"
+            "Ctrl+B: Buy Pro\n"
+            "Ctrl+P: Pause/Resume header animation")
+
+    def _show_about(self):
+        win = tk.Toplevel(self); win.title("About Glass"); win.configure(bg=self.cget("bg"))
+        win.resizable(False, False)
+        ttk.Label(win, text="Glass", style="Header.TLabel").grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
+        ttk.Label(win, text=f"Version {APP_VERSION}", style="Subtle.TLabel").grid(row=1, column=0, sticky="w", padx=12)
+        img_label = ttk.Label(win, text="(no photo)"); img_label.grid(row=2, column=0, sticky="w", padx=12, pady=(8, 8))
+        try:
+            from PIL import Image, ImageTk  # type: ignore
+            if self.about_photo_path and Path(self.about_photo_path).exists():
+                im = Image.open(self.about_photo_path).convert("RGBA"); im.thumbnail((240, 240))
+                self._about_imgtk = ImageTk.PhotoImage(im); img_label.configure(image=self._about_imgtk, text="")
+        except Exception:
+            pass
+        def choose():
+            path = filedialog.askopenfilename(title="Choose a local photo",
+                                              filetypes=[("Images","*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif")])
+            if not path: return
+            self.about_photo_path = path; self._persist_state()
+            try:
+                from PIL import Image, ImageTk  # type: ignore
+                im = Image.open(path).convert("RGBA"); im.thumbnail((240, 240))
+                self._about_imgtk = ImageTk.PhotoImage(im); img_label.configure(image=self._about_imgtk, text="")
+            except Exception:
+                img_label.configure(text=path)
+        btnrow = ttk.Frame(win); btnrow.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 12)); btnrow.columnconfigure(0, weight=1)
+        ttk.Button(btnrow, text="Choose photo…", command=choose).grid(row=0, column=0, sticky="w")
+        ttk.Button(btnrow, text="Close", command=win.destroy).grid(row=0, column=1, sticky="e")
+
+    def _set_opacity_preset(self, pct: int):
+        pct = max(20, min(100, int(pct)))
+        self.scale_opacity.set(pct)
+        self._on_opacity_change(None)
+
+    def _on_pause_toggle(self):
+        self.pause_anim = bool(self.var_pause_anim.get())
+        try:
+            if self.pause_anim: self.globe.stop()
+            else: self.globe.start()
+        except Exception:
+            pass
+        self._persist_state()
+
+    def _on_startup_toggle(self):
+        wanted = bool(self.var_startup.get())
+        try: ok = self._startup_set(wanted)
+        except Exception: ok = False
+        if ok:
+            self.run_at_startup = wanted
+            self.toasts.show("Startup setting updated.", "ok")
+            self._persist_state()
+        else:
+            self.var_startup.set(self.run_at_startup)
+            if getattr(sys, "frozen", False): self.toasts.show("Couldn't change startup (registry/permission).", "warn")
+            else: self.toasts.show("Build the EXE to enable startup.", "warn")
+
+    def _copy_diag(self):
+        info = (
+            f"Glass {APP_VERSION}\n"
+            f"HWID={self.hwid}\n"
+            f"Tier={self.tier.name} ({'∞' if self.tier.max_windows>=9999 else self.tier.max_windows})\n"
+            f"Domain={DOMAIN}\n"
+            f"Frozen={getattr(sys,'frozen',False)}\n"
+        )
+        try:
+            self.clipboard_clear(); self.clipboard_append(info)
+            self.toasts.show("Diagnostics copied.", "ok")
+        except Exception:
+            self.toasts.show("Clipboard unavailable.", "err")
+
+    # ----- export/import/reset -----
+    def _export_settings(self):
+        try:
+            path = filedialog.asksaveasfilename(title="Export settings", defaultextension=".json", filetypes=[("JSON","*.json")])
+            if not path: return
+            data = {
+                "_recent_targets": getattr(self, "_recent_targets", []),
+                "_last_config": getattr(self, "public_config", {}),
+                "_last_state": {
+                    "last_selected": getattr(self, "last_selected", ""),
+                    "last_opacity": int(getattr(self, "last_opacity", 85)),
+                    "last_pin": bool(getattr(self, "last_pin", False)),
+                    "theme": getattr(self, "current_theme", "Mint Recall"),
+                    "compact": bool(getattr(self, "compact_mode", False)),
+                    "applied_targets": sorted(list(getattr(self, "applied_targets", set()))),
+                    "about_photo": getattr(self, "about_photo_path", ""),
+                    "pause_anim": getattr(self, "pause_anim", False),
+                    "run_at_startup": getattr(self, "run_at_startup", False),
+                }
+            }
+            with open(path, "w", encoding="utf-8") as f: json.dump(data, f, indent=2)
+            self.toasts.show("Settings exported.", "ok")
+        except Exception:
+            self.toasts.show("Export failed.", "err")
+
+    def _import_settings(self):
+        try:
+            path = filedialog.askopenfilename(title="Import settings", filetypes=[("JSON","*.json")])
+            if not path: return
+            with open(path, "r", encoding="utf-8") as f: data = json.load(f)
+            self._recent_targets = data.get("_recent_targets", [])
+            st = data.get("_last_state", {})
+            self.last_selected = st.get("last_selected", self.last_selected)
+            self.last_opacity  = int(st.get("last_opacity", self.last_opacity))
+            self.last_pin      = bool(st.get("last_pin", self.last_pin))
+            self.current_theme = st.get("theme", self.current_theme)
+            self.compact_mode  = bool(st.get("compact", self.compact_mode))
+            self.applied_targets = set(st.get("applied_targets", list(self.applied_targets)))
+            self.about_photo_path = st.get("about_photo", self.about_photo_path)
+            self.pause_anim = bool(st.get("pause_anim", self.pause_anim))
+            self.run_at_startup = bool(st.get("run_at_startup", self.run_at_startup))
+            self.cb_recent["values"] = self._recent_targets
+            self.var_opacity.set(self.last_opacity); self.lbl_opacity.config(text=f"{self.last_opacity}%")
+            self.var_pin.set(self.last_pin)
+            self.var_compact.set(self.compact_mode)
+            self._apply_theme(self.current_theme)
+            if self.compact_mode: self._toggle_compact()
+            if self.last_selected: self.cb_windows.set(self.last_selected)
+            self._persist_state()
+            self.toasts.show("Settings imported.", "ok")
+        except Exception:
+            self.toasts.show("Import failed.", "err")
+
+    def _reset_defaults(self):
+        try:
+            self._recent_targets = []
+            self.last_selected = ""
+            self.var_opacity.set(85); self.lbl_opacity.config(text="85%")
+            self.var_pin.set(False)
+            if self.compact_mode:
+                self.var_compact.set(False); self._toggle_compact()
+            self.current_theme = "Mint Recall"; self._apply_theme(self.current_theme)
+            self.applied_targets.clear()
+            self.pause_anim = False
+            self.run_at_startup = False
+            self._persist_state()
+            self.toasts.show("Reset to defaults.", "ok")
+        except Exception:
+            self.toasts.show("Reset failed.", "err")
+
+    # ---------- networking/state ----------
+    def _load_config_and_tier_async(self):
+        def worker():
+            offline = False
+            try:
+                cfg = get_json(f"{DOMAIN}/public-config", timeout=4.0, retries=1)
+                if cfg: self.public_config.update(cfg)
+                d = settings_load(); d["_last_config"] = self.public_config; settings_save(d)
+            except Exception:
+                last = getattr(self, "_last_config", {})
+                if last: self.public_config.update(last)
+                offline = True
+            self.after(0, self._apply_config_ui_from_public())
+            if offline: self.toasts.show("Offline – using last known settings.", "warn")
+            self._verify_tier_async()
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_config_ui_from_public(self):
+        s_enabled = bool(self.public_config.get("starter_sales_enabled", True))
+        s_price   = str(self.public_config.get("starter_price", "5"))
+        s_url     = self.public_config.get("starter_buy_url") or f"{DOMAIN}/buy?tier=starter"
+
+        p_enabled = bool(self.public_config.get("pro_sales_enabled", True))
+        p_price   = str(self.public_config.get("pro_price", "9.99"))
+        p_intro   = str(self.public_config.get("price_intro", "5"))
+        p_intro_on = bool(self.public_config.get("intro_active", False))
+        p_url     = self.public_config.get("pro_buy_url") or f"{DOMAIN}/buy?tier=pro"
+
+        def apply_ui():
+            if s_enabled:
+                self.btn_buy_starter.config(
+                    text=f"Buy Starter (2 windows) – ${s_price}",
+                    command=lambda: self._open_url(s_url)
+                )
+                self.lbl_starter.config(text="Two windows total.")
+                self.row_starter.grid()
+            else:
+                self.row_starter.grid_remove()
+
+            self.lbl_pro.config(
+                text=(f"${p_intro} first month → then ${p_price}" if p_intro_on else f"${p_price}")
+            )
+            self.btn_buy_pro.config(command=lambda: self._open_url(p_url))
+            if p_enabled:
+                self.row_pro.grid()
+            else:
+                self.row_pro.grid_remove()
+        return apply_ui
+
+    def _verify_tier_async(self):
+        def worker():
+            try:
+                r = post_json(f"{DOMAIN}/verify", {"hwid": self.hwid}, timeout=4.5, retries=2)
+                self.tier = _infer_tier(r or {})
+                self.after(0, self._update_badge)
+            except Exception:
+                self.toasts.show("License check skipped (offline).", "warn")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_badge(self):
+        self.badge.config(text=self._badge_text())
+
+    # ---------- persistence ----------
+    def _safe_get(self, widget, default=""):
+        try:
+            if widget and hasattr(widget, "winfo_exists") and widget.winfo_exists() and hasattr(widget, "get"):
+                return widget.get()
+        except Exception:
+            pass
+        return default
+
+    def _persist_state_silent(self):
+        try: self._persist_state()
+        except Exception: pass
+
+    def _persist_state(self):
+        last_selected = self._safe_get(getattr(self, "cb_windows", None), getattr(self, "last_selected", ""))
+        try: last_opacity = int(self.var_opacity.get()) if hasattr(self, "var_opacity") else getattr(self, "last_opacity", 85)
+        except Exception: last_opacity = getattr(self, "last_opacity", 85)
+        try: last_pin = bool(self.var_pin.get()) if hasattr(self, "var_pin") else getattr(self, "last_pin", False)
+        except Exception: last_pin = getattr(self, "last_pin", False)
+        try: compact = bool(self.var_compact.get()) if hasattr(self, "var_compact") else getattr(self, "compact_mode", False)
+        except Exception: compact = getattr(self, "compact_mode", False)
+
+        d = settings_load()
+        d["_recent_targets"] = list(getattr(self, "_recent_targets", []))
+        d["_last_config"] = dict(getattr(self, "public_config", {}))
+        d["_last_state"] = {
+            "last_selected": last_selected,
+            "last_opacity": last_opacity,
+            "last_pin": last_pin,
+            "theme": getattr(self, "current_theme", "Mint Recall"),
+            "compact": compact,
+            "applied_targets": sorted(list(getattr(self, "applied_targets", set()))),
+            "about_photo": getattr(self, "about_photo_path", ""),
+            "pause_anim": getattr(self, "pause_anim", False),
+            "run_at_startup": getattr(self, "run_at_startup", False),
+        }
+        settings_save(d)
+
+    def _on_close(self):
+        self._persist_state()
+        self.destroy()
+
+# ---- robust main guard: print traceback if init fails -----------------------
+if __name__ == "__main__":
+    try:
+        app = GlassApp()
+    except Exception:
+        traceback.print_exc()
+        input("Press Enter to close...")
+        raise
+    app.mainloop()
+
+
+

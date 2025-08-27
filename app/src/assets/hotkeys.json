@@ -1,0 +1,9 @@
+{
+  "set_max_opacity": "ctrl+alt+up",
+  "set_half_opacity": "ctrl+alt+down",
+  "hide_window": "ctrl+alt+h",
+  "show_window": "ctrl+alt+s",
+  "apply_target": "ctrl+alt+t",
+  "pin_unpin": "ctrl+alt+b",
+  "focus_mode": "ctrl+alt+f"
+}

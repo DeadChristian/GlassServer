@@ -1,0 +1,13 @@
+{
+  "bg": "#0b1020",
+  "fg": "#dbeafe",
+  "fg_subtle": "#93c5fd",
+  "accent": "#60a5fa",
+  "muted": "#0f1426",
+  "border": "#1b2238",
+  "badge_bg": "#0d1326",
+  "badge_fg": "#60a5fa",
+  "warn": "#f59e0b",
+  "err": "#ef4444",
+  "name": "Slate"
+}

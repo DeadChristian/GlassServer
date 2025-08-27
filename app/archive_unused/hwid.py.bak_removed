@@ -1,0 +1,100 @@
+﻿# hwid.py — small, dependency-free HWID helper (Windows/macOS/Linux)
+from __future__ import annotations
+import hashlib, platform, uuid, subprocess
+
+def _hash(parts: list[str]) -> str:
+    s = "|".join(p for p in parts if p)
+    if not s:
+        s = "fallback:" + platform.node()
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:16].upper()
+
+def _win_machine_guid() -> str | None:
+    try:
+        import winreg
+        flags = winreg.KEY_READ
+        if hasattr(winreg, "KEY_WOW64_64KEY"):
+            flags |= winreg.KEY_WOW64_64KEY
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography", 0, flags) as k:
+            v, _ = winreg.QueryValueEx(k, "MachineGuid")
+            v = (v or "").strip()
+            return v or None
+    except Exception:
+        return None
+
+def _win_volume_serial(drive: str = "C:") -> str | None:
+    try:
+        out = subprocess.check_output(["cmd", "/c", "vol", drive], text=True, stderr=subprocess.DEVNULL)
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if "Serial Number is" in line:
+                return line.rsplit(" ", 1)[-1].replace("-", "").strip()
+        return None
+    except Exception:
+        return None
+
+def _win_uuid() -> str | None:
+    try:
+        out = subprocess.check_output(["wmic", "csproduct", "get", "uuid"], text=True, stderr=subprocess.DEVNULL)
+        vals = [x.strip() for x in (out or "").splitlines() if x.strip() and x.strip().lower() != "uuid"]
+        return (vals[0] if vals else None) or None
+    except Exception:
+        return None
+
+def _mac_serial() -> str | None:
+    if platform.system().lower() != "darwin":
+        return None
+    try:
+        out = subprocess.check_output(
+            ["ioreg", "-c", "IOPlatformExpertDevice", "-d", "2"],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        for line in (out or "").splitlines():
+            if "IOPlatformSerialNumber" in line:
+                s = line.split("=", 1)[-1].strip().strip('"')
+                return s or None
+    except Exception:
+        pass
+    return None
+
+def _linux_machine_id() -> str | None:
+    if platform.system().lower() != "linux":
+        return None
+    for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                v = f.read().strip()
+                if v:
+                    return v
+        except Exception:
+            pass
+    return None
+
+def get_hwid() -> str:
+    parts: list[str] = []
+    sysname = platform.system().lower()
+
+    if "windows" in sysname:
+        parts.append("win")
+        parts.append(_win_machine_guid() or "")
+        parts.append(_win_volume_serial("C:") or "")
+        parts.append(_win_uuid() or "")
+    elif "darwin" in sysname:
+        parts.append("mac")
+        parts.append(_mac_serial() or "")
+    elif "linux" in sysname:
+        parts.append("linux")
+        parts.append(_linux_machine_id() or "")
+
+    try:
+        parts.append(f"{uuid.getnode():012X}")  # MAC-ish
+    except Exception:
+        pass
+    try:
+        parts.append(platform.node())
+    except Exception:
+        pass
+
+    return _hash(parts)
+
+if __name__ == "__main__":
+    print(get_hwid())

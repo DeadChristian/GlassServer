@@ -1,0 +1,13 @@
+{
+  "name": "Ocean Night",
+  "bg": "#0c1116",
+  "fg": "#e6f2ff",
+  "fg_subtle": "#94a9c9",
+  "accent": "#3cb6ff",
+  "muted": "#101926",
+  "border": "#142033",
+  "badge_bg": "#0f2030",
+  "badge_fg": "#bfe6ff",
+  "warn": "#ffcf66",
+  "err": "#ff6b84"
+}
