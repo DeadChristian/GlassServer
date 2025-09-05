@@ -2,38 +2,65 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Not Found — Glass</title>
-  <link rel="stylesheet" href="/launch/styles.css" />
-  <link rel="icon" type="image/svg+xml" href="/launch/logo.svg" />
-  <style>
-    .nf { text-align:center; padding:64px 24px }
-    .nf h1 { font-size:40px; margin:0 0 8px }
-    .nf p { color: var(--muted); margin: 0 0 20px }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Glass — FAQ & Shortcuts</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header class="wrap header">
-    <a href="/launch" class="logo-link">
-      <img src="/launch/logo.svg" alt="Glass Logo" class="logo" width="48" height="48" />
-    </a>
-    <nav>
-      <a href="/launch">Home</a>
-      <a href="/launch/privacy.html">Privacy</a>
-      <a href="/launch/terms.html">Terms</a>
-    </nav>
+  <header class="nav">
+    <div class="container">
+      <a class="brand" href="/">Glass</a>
+      <nav class="links">
+        <a aria-current="page" href="help.html">FAQ</a>
+        <a href="privacy.html">Privacy</a>
+        <a href="terms.html">Terms</a>
+        <a href="https://gumroad.com/l/GLASS_PRO_LICENSE" class="btn ghost" rel="noopener">Buy Pro — $5</a>
+      </nav>
+    </div>
   </header>
 
-  <main class="wrap nf">
-    <h1>404 — Page not found</h1>
-    <p>That link doesn’t exist. Try going back to the homepage.</p>
-    <p><a class="btn" href="/launch">← Back to Home</a></p>
+  <main class="container page">
+    <h1>FAQ</h1>
+
+    <details open>
+      <summary>How do I install Glass?</summary>
+      <p>Download <strong>Glass.exe</strong> and run it. No installer needed. If SmartScreen warns you, click <em>More info → Run anyway</em>.</p>
+    </details>
+
+    <details>
+      <summary>How do I unlock Pro?</summary>
+      <p>Buy once on Gumroad. In the app, open <em>Pro → Enter license…</em>, paste your key, and activate. Pro unlocks instantly.</p>
+    </details>
+
+    <details>
+      <summary>Do I need internet every time?</summary>
+      <p>After one successful validation, Glass grants a 7-day offline grace period. When you’re back online, it refreshes automatically.</p>
+    </details>
+
+    <details>
+      <summary>What’s Free vs Pro?</summary>
+      <ul>
+        <li><strong>Free:</strong> Opacity + live apply, save per-window, theme, and tinting the Glass app itself (doesn’t count).</li>
+        <li><strong>Pro:</strong> Always-on-top, Click-through (toggle + hold-key), Lock, Quick preset, Globe, Theme Designer.</li>
+      </ul>
+    </details>
+
+    <h2>Shortcuts</h2>
+    <ul class="kbd-list">
+      <li><span class="kbd">Ctrl</span> + <span class="kbd">Enter</span> — Apply</li>
+      <li><span class="kbd">Ctrl</span> + <span class="kbd">0</span> — Reset to 100%</li>
+      <li><span class="kbd">Ctrl</span> + <span class="kbd">↑</span>/<span class="kbd">↓</span> — Nudge opacity ±5%</li>
+      <li><span class="kbd">Ctrl</span> + <span class="kbd">T</span> — Always on top (Pro)</li>
+      <li><span class="kbd">Ctrl</span> + <span class="kbd">G</span> — Click-through (Pro)</li>
+      <li><span class="kbd">Ctrl</span> + <span class="kbd">L</span> — Lock (Top + Click-through) (Pro)</li>
+      <li><strong>Hold Left Alt</strong> — Momentary pass-through (Pro)</li>
+      <li><span class="kbd">F5</span> — Refresh window list</li>
+    </ul>
+
+    <p class="muted">Settings and license live at <code>%APPDATA%\Glass\</code>. We do not collect usage telemetry.</p>
   </main>
 
-  <footer class="wrap footer">
-    <p>&copy; <span id="year"></span> Glass</p>
-  </footer>
-
+  <footer class="container footer"><div>© <span id="year"></span> Glass</div></footer>
   <script>document.getElementById('year').textContent = new Date().getFullYear();</script>
 </body>
 </html>

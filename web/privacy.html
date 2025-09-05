@@ -3,70 +3,110 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Privacy Policy — Glass</title>
-  <link rel="stylesheet" href="/launch/styles.css" />
-  <link rel="icon" type="image/svg+xml" href="/launch/logo.svg" />
+  <title>Privacy Policy — GlassApp</title>
+
+  <!-- If your CSS lives elsewhere, update this path -->
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="icon" href="/static/favicon.ico" />
+  <meta name="description" content="GlassApp Privacy Policy" />
 </head>
 <body>
   <header class="wrap header">
-    <a href="/launch" class="logo-link">
-      <img src="/launch/logo.svg" alt="Glass Logo" class="logo" width="48" height="48" />
+    <a href="/" class="logo-link">
+      <img src="/static/glass_logo_dark.svg" alt="GlassApp" class="logo" width="120" height="28" />
     </a>
     <nav>
-      <a href="/launch">Home</a>
-      <a href="/launch/privacy.html" class="active">Privacy</a>
-      <a href="/launch/terms.html">Terms</a>
+      <a href="/">Home</a>
+      <a href="/privacy.html" class="active">Privacy</a>
+      <a href="/terms.html">Terms</a>
     </nav>
   </header>
 
   <main class="wrap">
     <h1>Privacy Policy</h1>
-    <p class="sub">Last updated: August 2025</p>
+    <p class="sub">Last updated: <time datetime="2025-09-05">September 5, 2025</time></p>
 
-    <h2>What we collect</h2>
+    <p>Thank you for using <strong>GlassApp</strong> (“we”, “us”, “our”). This policy explains what we collect, why we collect it, and the choices you have. We designed GlassApp to be privacy-respecting by default: the Windows app runs locally and does <em>not</em> collect usage telemetry.</p>
+
+    <h2 id="scope">Scope</h2>
+    <p>This policy covers (a) the GlassApp Windows application and (b) our website at <a href="https://glassapp.me">glassapp.me</a> (the “Site”).</p>
+
+    <h2 id="data-we-collect">Data we collect</h2>
     <ul>
-      <li><strong>Referral events:</strong> when someone clicks a referral link or downloads via that link, we log IP address and user agent to prevent abuse and match installs within 24 hours.</li>
-      <li><strong>Activation &amp; license checks:</strong> when the app verifies your tier (Free / Referral / Pro), we receive your device identifier (HWID) and minimal metadata (IP address and user agent) to enforce limits and fight fraud.</li>
-      <li><strong>Purchases:</strong> payment providers send us buyer email and basic order details so we can issue or manage your license.</li>
+      <li><strong>License & activation</strong> (App): when validating or activating a license, we process a hardware identifier (HWID), license key or token, app version, basic device metadata, and IP address. This is required to issue and enforce licenses, apply device limits, and prevent fraud.</li>
+      <li><strong>Purchases</strong> (Site/Payment): our payment provider (e.g., Gumroad/Stripe/LemonSqueezy) shares buyer email and basic order details with us so we can issue/manage your license and provide support. We never receive full payment card numbers.</li>
+      <li><strong>Referral events</strong> (optional): if you use a referral link, we may log IP address and user agent for short-term attribution and abuse prevention.</li>
+      <li><strong>Support</strong>: if you email us, we receive your email address and message content.</li>
     </ul>
 
-    <h2>What we don’t collect</h2>
+    <h3>What we do <em>not</em> collect</h3>
     <ul>
-      <li>No usage telemetry (no screen content, no window titles, no keystrokes).</li>
-      <li>No analytics beacons on the app. The website is simple static files.</li>
+      <li>No screen contents, no keystrokes, no per-window usage telemetry from the app.</li>
+      <li>No in-app analytics beacons. The app works offline except for license checks.</li>
     </ul>
 
-    <h2>How we use data</h2>
+    <h2 id="how-we-use">How we use data</h2>
     <ul>
-      <li>Provide the service (license issuance, verification, referral attribution).</li>
-      <li>Prevent abuse (rate limiting, fraud checks, chargeback revocation).</li>
-      <li>Support (reply to your emails and assist with activation).</li>
+      <li>Provide and maintain the service (license issuance, validation, updates).</li>
+      <li>Prevent abuse and fraud (rate limiting, chargeback/revocation handling).</li>
+      <li>Support you (answer questions, troubleshoot activation issues).</li>
+      <li>Comply with legal obligations (tax, accounting, regulatory requests).</li>
     </ul>
 
-    <h2>Sharing</h2>
-    <p>We don’t sell your data. We share only what’s necessary with payment processors (e.g., Gumroad/Stripe/LemonSqueezy) and email delivery (your email address for license mail). </p>
-
-    <h2>Retention</h2>
-    <p>Referral and license-check logs are kept for a limited period to prevent abuse. Purchase records and license data are kept as long as needed to provide your license.</p>
-
-    <h2>Your choices</h2>
+    <h2 id="legal-bases">Legal bases (where applicable)</h2>
     <ul>
-      <li>You can use the Free version without purchase.</li>
-      <li>You can request access or deletion of email-bound data by contacting support. If we delete license data tied to an active license, the license may stop working.</li>
+      <li><strong>Contract</strong>: to provide your license and the features you requested.</li>
+      <li><strong>Legitimate interests</strong>: to secure our services and prevent fraud.</li>
+      <li><strong>Consent</strong>: for any optional referral tracking or marketing you opt into.</li>
+      <li><strong>Legal obligation</strong>: to meet record-keeping and compliance duties.</li>
     </ul>
 
-    <h2>Security</h2>
-    <p>We use industry-standard measures (TLS, limited access, server-side secrets). No method is 100% secure, but we work to protect your data.</p>
+    <h2 id="sharing">Sharing</h2>
+    <p>We don’t sell your data. We share only what’s necessary with trusted processors, for example:</p>
+    <ul>
+      <li><strong>Payment processing</strong> (e.g., Gumroad/Stripe/LemonSqueezy) — purchase and licensing.</li>
+      <li><strong>Email delivery</strong> — sending license emails and support replies.</li>
+      <li><strong>Hosting/CDN</strong> — serving our Site and downloads.</li>
+    </ul>
+    <p>Processors are bound by agreements to protect your data and act only on our instructions.</p>
 
-    <h2>Changes</h2>
-    <p>We may update this policy. We’ll update the “Last updated” date above and post changes here.</p>
+    <h2 id="retention">Retention</h2>
+    <ul>
+      <li>License records are kept while your license remains active and as required by law.</li>
+      <li>Referral/anti-abuse logs are kept for a limited period (typically ≤30 days).</li>
+      <li>Support emails are retained as long as needed to assist you and maintain records.</li>
+    </ul>
 
-    <h2>Contact</h2>
-    <p>Questions? Email <a href="mailto:support@glassapp.me">support@glassapp.me</a></p>
+    <h2 id="security">Security</h2>
+    <p>We use industry-standard safeguards (TLS, access controls, server-side secrets). No method is 100% secure, but we work to protect your data and review our practices regularly.</p>
+
+    <h2 id="international">International transfers</h2>
+    <p>Your data may be processed in countries different from your own. When required, we rely on approved transfer mechanisms (e.g., SCCs) with our processors.</p>
+
+    <h2 id="your-rights">Your rights & choices</h2>
+    <ul>
+      <li><strong>Access/Deletion/Correction</strong>: contact us to request access, deletion, or correction of your personal data.</li>
+      <li><strong>Opt-out</strong>: you can use the Free app without purchase; you may opt out of optional referral programs or marketing.</li>
+      <li><strong>EU/UK</strong>: you may have rights under GDPR (access, rectification, erasure, restriction, portability, objection).</li>
+      <li><strong>California</strong>: you may have rights under the CCPA/CPRA (know, delete, correct, limit use of sensitive personal info, non-discrimination).</li>
+    </ul>
+    <p>To exercise rights, email <a href="mailto:support@glassapp.me">support@glassapp.me</a>. We’ll verify your request and respond consistent with applicable law.</p>
+
+    <h2 id="children">Children</h2>
+    <p>GlassApp is not directed to children under 13 (or the age of digital consent in your region). We do not knowingly collect data from children.</p>
+
+    <h2 id="do-not-track">Do Not Track</h2>
+    <p>Some browsers send a “DNT” signal. Because there’s no consistent industry response, our Site does not respond to DNT signals. We keep collection minimal by design.</p>
+
+    <h2 id="changes">Changes to this policy</h2>
+    <p>We may update this policy from time to time. We’ll update the “Last updated” date and post changes here. If changes are material, we may provide additional notice.</p>
+
+    <h2 id="contact">Contact</h2>
+    <p>Questions or requests? Email <a href="mailto:support@glassapp.me">support@glassapp.me</a>.</p>
   </main>
 
   <footer class="wrap footer">
-    <p>&copy; <span id="year"></span> Glass — <a href="/launch/privacy.html">Privacy</a> • <a href="/launch/terms.html">Terms</a></p>
+    <p>&copy; <span id="year"></span> GlassApp — <a href="/privacy.html">Privacy</a> • <a href="/terms.html">Terms</a></p>
   </footer>
 
   <script>document.getElementById('year').textContent = new Date().getFullYear();</script>

@@ -1,4 +1,14 @@
-[
-  { "version": "v0.9.0", "date": "2025-08-10", "notes": "Initial Free + Referral build." },
-  { "version": "v1.0.0", "date": "2025-08-20", "notes": "Pro released with license activation and fixes." }
-]
+{
+  "releases": [
+    {
+      "version": "v1.0.0",
+      "date": "2025-08-30",
+      "notes": [
+        "First public release.",
+        "Free: opacity + live apply, theme, Glass self-tint doesn’t count.",
+        "Pro: on-top, click-through (toggle + hold-key), lock, quick preset, globe, theme designer.",
+        "Offline grace: 7 days after a successful validation."
+      ]
+    }
+  ]
+}
