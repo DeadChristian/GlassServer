@@ -1,66 +1,135 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <title>Glass â€” Help & Shortcuts</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Glass — FAQ & Shortcuts</title>
-  <link rel="stylesheet" href="styles.css" />
+  <meta name="description" content="How to install Glass, unlock Pro, and use the shortcuts. Free vs Pro features and quick troubleshooting." />
+  <link rel="canonical" href="https://www.glassapp.me/help.html" />
+
+  <!-- Icons & CSS -->
+  <link rel="icon" href="/static/favicon.ico" />
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/static/styles.css" />
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="Glass â€” Help & Shortcuts" />
+  <meta property="og:description" content="Install, unlock Pro, and master the shortcuts. Left Alt hold is free." />
+  <meta property="og:url" content="https://www.glassapp.me/help.html" />
+  <meta property="og:image" content="https://www.glassapp.me/static/og_wide.png" />
 </head>
 <body>
   <header class="nav">
     <div class="container">
-      <a class="brand" href="/">Glass</a>
-      <nav class="links">
-        <a aria-current="page" href="help.html">FAQ</a>
-        <a href="privacy.html">Privacy</a>
-        <a href="terms.html">Terms</a>
-        <a href="https://gumroad.com/l/GLASS_PRO_LICENSE" class="btn ghost" rel="noopener">Buy Pro — $5</a>
-      </nav>
+      <a class="brand" href="/" aria-label="Glass home">
+        <img src="/static/glass_logo_bw.svg" alt="Glass" class="logo" width="132" height="28" />
+      </a>
+      <nav class="links" aria-label="Primary">
+        <a href="/">Home</a>
+        <a aria-current="page" href="/help.html">Help</a>
+        <a href="/privacy.html">Privacy</a>
+        <a href="/terms.html">Terms</a>
+        <a href="/buy" class="btn ghost" rel="noopener">Buy Pro â€” $5</a>
+      <button id="theme-toggle" class="btn ghost small" aria-pressed="false" aria-label="Toggle dark or light theme">☀️/🌙</button>
+</nav>
     </div>
   </header>
 
-  <main class="container page">
-    <h1>FAQ</h1>
+  <main class="container page" id="main">
+    <h1>Help & FAQ</h1>
 
-    <details open>
-      <summary>How do I install Glass?</summary>
-      <p>Download <strong>Glass.exe</strong> and run it. No installer needed. If SmartScreen warns you, click <em>More info → Run anyway</em>.</p>
-    </details>
+    <section aria-labelledby="install">
+      <h2 id="install">Install</h2>
+      <p>Download <a href="/download"><strong>Glass</strong></a> and run it. No installer needed. If SmartScreen warns you, click <em>More info â†’ Run anyway</em>.</p>
+    </section>
 
-    <details>
-      <summary>How do I unlock Pro?</summary>
-      <p>Buy once on Gumroad. In the app, open <em>Pro → Enter license…</em>, paste your key, and activate. Pro unlocks instantly.</p>
-    </details>
+    <section aria-labelledby="unlock">
+      <h2 id="unlock">Unlock Pro</h2>
+      <ol>
+        <li><a href="/buy">Buy Pro</a> once.</li>
+        <li>In the app, open <em>Pro â†’ Enter licenseâ€¦</em>, paste your key, and activate.</li>
+        <li>Pro unlocks instantly; your UI will say <em>Pro x/5</em>.</li>
+      </ol>
+      <p class="muted">After a successful validation, Glass supports a short offline grace period and refreshes automatically when youâ€™re back online.</p>
+    </section>
 
-    <details>
-      <summary>Do I need internet every time?</summary>
-      <p>After one successful validation, Glass grants a 7-day offline grace period. When you’re back online, it refreshes automatically.</p>
-    </details>
+    <section aria-labelledby="free-vs-pro">
+      <h2 id="free-vs-pro">Whatâ€™s Free vs Pro?</h2>
+      <div class="grid two">
+        <div class="card">
+          <h3>Free</h3>
+          <ul>
+            <li>Opacity slider + live apply</li>
+            <li>Per-window save & reset</li>
+            <li><strong>Click-through (hold key)</strong> â€” <em>Hold Left Alt</em></li>
+            <li>Clean theme</li>
+            <li><em>Making the Glass app itself transparent does not count</em></li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Pro â€” $5</h3>
+          <ul>
+            <li>Always on top</li>
+            <li>Click-through (sticky toggle)</li>
+            <li>Lock (on-top + click-through)</li>
+            <li>Up to 5 windows</li>
+            <li>Globe widget, Theme Designer</li>
+            <li>Window list & search (optional)</li>
+          </ul>
+        </div>
+      </div>
+    </section>
 
-    <details>
-      <summary>What’s Free vs Pro?</summary>
-      <ul>
-        <li><strong>Free:</strong> Opacity + live apply, save per-window, theme, and tinting the Glass app itself (doesn’t count).</li>
-        <li><strong>Pro:</strong> Always-on-top, Click-through (toggle + hold-key), Lock, Quick preset, Globe, Theme Designer.</li>
+    <section aria-labelledby="shortcuts">
+      <h2 id="shortcuts">Shortcuts</h2>
+      <ul class="kbd-list">
+        <li><span class="kbd">Ctrl</span> + <span class="kbd">Enter</span> â€” Apply</li>
+        <li><span class="kbd">Ctrl</span> + <span class="kbd">0</span> â€” Reset to 100%</li>
+        <li><span class="kbd">Ctrl</span> + <span class="kbd">â†‘</span>/<span class="kbd">â†“</span> â€” Nudge opacity Â±5%</li>
+        <li><span class="kbd">Ctrl</span> + <span class="kbd">T</span> â€” Always on top <span class="tag">Pro</span></li>
+        <li><span class="kbd">Ctrl</span> + <span class="kbd">G</span> â€” Click-through (sticky) <span class="tag">Pro</span></li>
+        <li><span class="kbd">Ctrl</span> + <span class="kbd">L</span> â€” Lock (Top + Click-through) <span class="tag">Pro</span></li>
+        <li><strong>Hold Left Alt</strong> â€” Momentary pass-through <span class="tag">Free</span></li>
+        <li><span class="kbd">F5</span> â€” Refresh window list</li>
       </ul>
-    </details>
+    </section>
 
-    <h2>Shortcuts</h2>
-    <ul class="kbd-list">
-      <li><span class="kbd">Ctrl</span> + <span class="kbd">Enter</span> — Apply</li>
-      <li><span class="kbd">Ctrl</span> + <span class="kbd">0</span> — Reset to 100%</li>
-      <li><span class="kbd">Ctrl</span> + <span class="kbd">↑</span>/<span class="kbd">↓</span> — Nudge opacity ±5%</li>
-      <li><span class="kbd">Ctrl</span> + <span class="kbd">T</span> — Always on top (Pro)</li>
-      <li><span class="kbd">Ctrl</span> + <span class="kbd">G</span> — Click-through (Pro)</li>
-      <li><span class="kbd">Ctrl</span> + <span class="kbd">L</span> — Lock (Top + Click-through) (Pro)</li>
-      <li><strong>Hold Left Alt</strong> — Momentary pass-through (Pro)</li>
-      <li><span class="kbd">F5</span> — Refresh window list</li>
-    </ul>
+    <section aria-labelledby="troubleshoot">
+      <h2 id="troubleshoot">Troubleshooting</h2>
+      <details>
+        <summary>SmartScreen blocks Glass</summary>
+        <p>Click <em>More info</em> then <em>Run anyway</em>. Glass is a small Windows utility without telemetry.</p>
+      </details>
+      <details>
+        <summary>â€œActivation failedâ€</summary>
+        <p>Check your internet connection and system time, and make sure <code>https://www.glassapp.me</code> isnâ€™t blocked by a firewall/VPN. If it persists, email support with your HWID.</p>
+      </details>
+      <details>
+        <summary>Free slot says 1/1</summary>
+        <p>Use <strong>Reset</strong> on a window you no longer need to reclaim your free slot. The Glass app itself doesnâ€™t count toward your window limit.</p>
+      </details>
+    </section>
 
-    <p class="muted">Settings and license live at <code>%APPDATA%\Glass\</code>. We do not collect usage telemetry.</p>
+    <section aria-labelledby="where">
+      <h2 id="where">Where does Glass store settings?</h2>
+      <p>Settings and license live at <code>%APPDATA%\Glass\</code>. You can back up that folder to keep your preferences.</p>
+    </section>
+
+    <section aria-labelledby="contact">
+      <h2 id="contact">Need help?</h2>
+      <p>Email <a href="mailto:support@glassapp.me">support@glassapp.me</a> or DM <a href="https://x.com/GlassApp" rel="me noopener">@GlassApp</a> on X.</p>
+    </section>
   </main>
 
-  <footer class="container footer"><div>© <span id="year"></span> Glass</div></footer>
+  <footer class="container footer" role="contentinfo">
+    <div>Â© <span id="year"></span> Glass</div>
+    <div><a href="/privacy.html">Privacy</a> â€¢ <a href="/terms.html">Terms</a></div>
+  </footer>
+
   <script>document.getElementById('year').textContent = new Date().getFullYear();</script>
+  <script src="/static/app.js" defer></script>
 </body>
 </html>
+
+
