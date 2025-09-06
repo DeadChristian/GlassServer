@@ -690,3 +690,4 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
             return FileResponse(str(p), status_code=404, media_type="text/html")
     return JSONResponse({"detail": getattr(exc, "detail", "Not Found")}, status_code=exc.status_code)
 
+
