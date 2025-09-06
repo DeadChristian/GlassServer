@@ -12,7 +12,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import (
+from fastapi.responses import (, Response
     FileResponse, RedirectResponse, JSONResponse, PlainTextResponse
 )
 from starlette.staticfiles import StaticFiles
@@ -689,3 +689,4 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
         if p.exists():
             return FileResponse(str(p), status_code=404, media_type="text/html")
     return JSONResponse({"detail": getattr(exc, "detail", "Not Found")}, status_code=exc.status_code)
+
