@@ -13,7 +13,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, Response, Query, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import FileResponse, RedirectResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 # ===== Env =====
@@ -279,10 +279,72 @@ def _email_plain(to_email: str, subject: str, body: str) -> None:
 
     print(f"[EMAIL_DISABLED]\nTo: {to_email}\nSubj: {subject}\n{body}")
 
-# ===== Routes =====
-@app.get("/")
+# ===== Site routes =====
+@app.get("/", include_in_schema=False)
 def root():
-    return {"ok": True, "service": "glass", "docs": "/docs", "health": "/healthz"}
+    return FileResponse(str(ROOT / "web" / "index.html"), media_type="text/html")
+
+@app.head("/", include_in_schema=False)
+def head_root():
+    return Response(status_code=200)
+
+@app.get("/privacy.html", include_in_schema=False)
+def privacy_page():
+    return FileResponse(str(ROOT / "web" / "privacy.html"), media_type="text/html")
+
+@app.get("/help.html", include_in_schema=False)
+def help_page():
+    return FileResponse(str(ROOT / "web" / "help.html"), media_type="text/html")
+
+@app.get("/terms.html", include_in_schema=False)
+def terms_page():
+    path = ROOT / "web" / "terms.html"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="terms.html not found in /web")
+    return FileResponse(str(path), media_type="text/html")
+
+@app.get("/download", include_in_schema=False)
+def download():
+    for name in ("Glass.exe", "GlassSetup.exe"):
+        p = STATIC_DIR / name
+        if p.exists():
+            return FileResponse(str(p), media_type="application/octet-stream", filename=name)
+    raise HTTPException(status_code=404, detail="Installer not found in /web/static")
+
+@app.get("/robots.txt", include_in_schema=False)
+def robots_txt():
+    domain = (DOMAIN or "https://glassapp.me").rstrip("/")
+    body = f"""User-agent: *
+Allow: /
+Sitemap: {domain}/sitemap.xml
+"""
+    return PlainTextResponse(body, media_type="text/plain; charset=utf-8")
+
+@app.get("/sitemap.xml", include_in_schema=False)
+def sitemap_xml():
+    domain = (DOMAIN or "https://glassapp.me").rstrip("/")
+    urls = [
+        f"{domain}/",
+        f"{domain}/privacy.html",
+        f"{domain}/help.html",
+        f"{domain}/terms.html",
+        f"{domain}/download",
+    ]
+    xml = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for u in urls:
+        xml.append("  <url>")
+        xml.append(f"    <loc>{u}</loc>")
+        xml.append("  </url>")
+    xml.append("</urlset>")
+    return Response("\n".join(xml), media_type="application/xml")
+
+@app.get("/static-list")
+def static_list():
+    try:
+        files = sorted(p.name for p in STATIC_DIR.iterdir()) if STATIC_DIR.exists() else []
+        return {"root": str(ROOT), "static": str(STATIC_DIR), "exists": STATIC_DIR.exists(), "files": files}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/healthz")
 def healthz():
@@ -311,13 +373,13 @@ def public_config(response: Response):
 def buy_redirect(tier: str = "pro"):
     return RedirectResponse(url=PRO_BUY_URL, status_code=307)
 
-@app.get("/static-list")
-def static_list():
-    try:
-        files = sorted(p.name for p in STATIC_DIR.iterdir()) if STATIC_DIR.exists() else []
-        return {"root": str(ROOT), "static": str(STATIC_DIR), "exists": STATIC_DIR.exists(), "files": files}
-    except Exception as e:
-        return {"error": str(e)}
+# ===== License & token routes =====
+class IssueIn(BaseModel):
+    max_concurrent: int = Field(default=5, ge=1, le=50)
+    max_activations: int = Field(default=1, ge=1, le=50)
+    tier: str = Field(default="pro")
+    email: Optional[str] = None
+    prefix: str = Field(default="GL")
 
 @app.post("/license/issue")
 def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):
@@ -331,6 +393,10 @@ def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query
         )
         return {"ok": True, "key": key, "tier": body.tier.lower(),
                 "max_concurrent": body.max_concurrent, "max_activations": body.max_activations}
+
+class ActivateIn(BaseModel):
+    hwid: str = Field(min_length=1)
+    key:  str = Field(min_length=1)
 
 @app.post("/license/activate")
 def license_activate(body: ActivateIn):
@@ -397,6 +463,10 @@ def license_activate(body: ActivateIn):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"activate_error: {e.__class__.__name__}: {e}")
 
+class ValidateIn(BaseModel):
+    token: str = Field(min_length=1)
+    hwid:  str = Field(min_length=1)
+
 @app.post("/license/validate")
 def license_validate(body: ValidateIn):
     hwid = body.hwid.strip()
@@ -410,6 +480,10 @@ def license_validate(body: ValidateIn):
         return {"ok": True, "tier": tier,
                 "download_url": DOWNLOAD_URL_PRO if tier == "pro" else "",
                 "addons_url": ADDONS_URL if tier == "pro" else ""}
+
+class IntrospectIn(BaseModel):
+    token: str = Field(min_length=1)
+    hwid: Optional[str] = None
 
 @app.post("/token/introspect")
 def token_introspect(body: IntrospectIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):
@@ -456,6 +530,9 @@ def token_introspect(body: IntrospectIn, request: Request, secret: Optional[str]
             }
     return out
 
+class RevokeIn(BaseModel):
+    token: str = Field(min_length=1)
+
 @app.post("/token/revoke")
 def token_revoke(body: RevokeIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):
     _require_admin(secret, request)
@@ -464,7 +541,7 @@ def token_revoke(body: RevokeIn, request: Request, secret: Optional[str] = Query
         cur = con.execute("UPDATE license_tokens SET revoked=1 WHERE token=?", (tok,))
         return {"ok": True, "updated": int(cur.rowcount)}
 
-# ===== Gumroad webhook (no python-multipart needed) =====
+# ===== Gumroad webhook =====
 def _gum_tier_for(product_id: str) -> str:
     pid = (product_id or "").strip()
     if GUMROAD_PRODUCT_STARTER and pid == GUMROAD_PRODUCT_STARTER:
@@ -503,7 +580,6 @@ async def gumroad_webhook(request: Request):
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Cannot parse x-www-form-urlencoded: {e}")
     else:
-        # Try Starlette form() (works if python-multipart installed). If not, fallback to JSON.
         try:
             form = await request.form()
             def fget(*keys):
@@ -544,7 +620,7 @@ async def gumroad_webhook(request: Request):
             f"Thanks for buying Glass {tier.title()}!\n\n"
             f"Download: {DOWNLOAD_URL_PRO or (DOMAIN + '/static/GlassSetup.exe')}\n"
             f"Your license key: {key}\n\n"
-            f"Activate: Open Glass -> Pro -> Enter license…\n"
+            f"Activate: Open Glass -> Pro -> Enter license...\n"
             f"Pro gives you up to {maxc} active windows, Ghost Clicks, and Topmost.\n\n"
             f"If you need help, reply to this email."
         )
@@ -552,6 +628,7 @@ async def gumroad_webhook(request: Request):
 
     return JSONResponse({"ok": True, "tier": tier, "key": key, "email": email, "purchase_id": purchase_id})
 
+# ===== Admin / verify =====
 @app.get("/admin/db-diag")
 def db_diag():
     try:
@@ -578,6 +655,7 @@ def verify(body: VerifyIn):
         return {"tier": "pro", "max_windows": PRO_MAX_WINDOWS}
     return {"tier": "free", "max_windows": FREE_MAX_WINDOWS}
 
+# ===== Main =====
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
