@@ -1,4 +1,4 @@
-# main.py � GlassServer (ASCII only)
+﻿# main.py — GlassServer (ASCII only)
 import os
 import sqlite3
 import time
@@ -679,3 +679,13 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
 
+
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+@app.exception_handler(StarletteHTTPException)
+async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if exc.status_code == 404:
+        p = WEB_DIR / "404.html"
+        if p.exists():
+            return FileResponse(str(p), status_code=404, media_type="text/html")
+    return JSONResponse({"detail": getattr(exc, "detail", "Not Found")}, status_code=exc.status_code)
