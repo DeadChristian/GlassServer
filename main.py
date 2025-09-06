@@ -1,4 +1,4 @@
-ï»¿# main.py - GlassServer (ASCII only)
+# main.py — GlassServer (ASCII only)
 import os
 import sqlite3
 import time
@@ -11,9 +11,11 @@ from typing import Optional, Dict, Any
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response, Query, Depends
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import (
+    FileResponse, RedirectResponse, JSONResponse, PlainTextResponse
+)
+from starlette.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 # ===== Env =====
@@ -23,8 +25,15 @@ DB_PATH = os.getenv("DB_PATH", "glass.db")
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
 TOKEN_TTL_DAYS = int(os.getenv("TOKEN_TTL_DAYS", "90"))
 
-DOWNLOAD_URL_PRO = os.getenv("DOWNLOAD_URL_PRO", f"{DOMAIN}/static/GlassSetup.exe" if DOMAIN else "")
-ADDONS_URL       = os.getenv("ADDONS_URL",       f"{DOMAIN}/static/pro_addons_v1.zip" if DOMAIN else "")
+# Default to Glass.exe if not explicitly set
+DOWNLOAD_URL_PRO = os.getenv(
+    "DOWNLOAD_URL_PRO",
+    f"{DOMAIN}/static/Glass.exe" if DOMAIN else ""
+)
+ADDONS_URL = os.getenv(
+    "ADDONS_URL",
+    f"{DOMAIN}/static/pro_addons_v1.zip" if DOMAIN else ""
+)
 
 FREE_MAX_WINDOWS    = int(os.getenv("FREE_MAX_WINDOWS", "1"))
 STARTER_MAX_WINDOWS = int(os.getenv("STARTER_MAX_WINDOWS", "2"))
@@ -61,9 +70,33 @@ app.add_middleware(
 )
 
 ROOT = Path(__file__).resolve().parent
-STATIC_DIR = ROOT / "web" / "static"
+WEB_DIR = ROOT / "web"
+STATIC_DIR = WEB_DIR / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# Static with long cache for assets
+class StaticFilesWithCache(StaticFiles):
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        if resp.status_code == 200:
+            # 1 year immutable cache for versioned/static assets
+            resp.headers.setdefault(
+                "Cache-Control", "public, max-age=31536000, immutable"
+            )
+        return resp
+
+app.mount("/static", StaticFilesWithCache(directory=str(STATIC_DIR)), name="static")
+
+# Security headers
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    return resp
 
 # ===== DB =====
 def _db() -> sqlite3.Connection:
@@ -282,7 +315,7 @@ def _email_plain(to_email: str, subject: str, body: str) -> None:
 # ===== Site routes =====
 @app.get("/", include_in_schema=False)
 def root():
-    return FileResponse(str(ROOT / "web" / "index.html"), media_type="text/html")
+    return FileResponse(str(WEB_DIR / "index.html"), media_type="text/html")
 
 @app.head("/", include_in_schema=False)
 def head_root():
@@ -290,26 +323,31 @@ def head_root():
 
 @app.get("/privacy.html", include_in_schema=False)
 def privacy_page():
-    return FileResponse(str(ROOT / "web" / "privacy.html"), media_type="text/html")
+    return FileResponse(str(WEB_DIR / "privacy.html"), media_type="text/html")
 
 @app.get("/help.html", include_in_schema=False)
 def help_page():
-    return FileResponse(str(ROOT / "web" / "help.html"), media_type="text/html")
+    return FileResponse(str(WEB_DIR / "help.html"), media_type="text/html")
 
 @app.get("/terms.html", include_in_schema=False)
 def terms_page():
-    path = ROOT / "web" / "terms.html"
-    if not path.exists():
+    p = WEB_DIR / "terms.html"
+    if not p.exists():
         raise HTTPException(status_code=404, detail="terms.html not found in /web")
-    return FileResponse(str(path), media_type="text/html")
+    return FileResponse(str(p), media_type="text/html")
 
 @app.get("/download", include_in_schema=False)
 def download():
+    # Prefer Glass.exe, fallback to GlassSetup.exe
     for name in ("Glass.exe", "GlassSetup.exe"):
         p = STATIC_DIR / name
         if p.exists():
             return FileResponse(str(p), media_type="application/octet-stream", filename=name)
     raise HTTPException(status_code=404, detail="Installer not found in /web/static")
+
+@app.get("/launch", include_in_schema=False)
+def launch():
+    return RedirectResponse(url="/download", status_code=307)
 
 @app.get("/robots.txt", include_in_schema=False)
 def robots_txt():
@@ -374,13 +412,6 @@ def buy_redirect(tier: str = "pro"):
     return RedirectResponse(url=PRO_BUY_URL, status_code=307)
 
 # ===== License & token routes =====
-class IssueIn(BaseModel):
-    max_concurrent: int = Field(default=5, ge=1, le=50)
-    max_activations: int = Field(default=1, ge=1, le=50)
-    tier: str = Field(default="pro")
-    email: Optional[str] = None
-    prefix: str = Field(default="GL")
-
 @app.post("/license/issue")
 def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):
     _require_admin(secret, request)
@@ -393,10 +424,6 @@ def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query
         )
         return {"ok": True, "key": key, "tier": body.tier.lower(),
                 "max_concurrent": body.max_concurrent, "max_activations": body.max_activations}
-
-class ActivateIn(BaseModel):
-    hwid: str = Field(min_length=1)
-    key:  str = Field(min_length=1)
 
 @app.post("/license/activate")
 def license_activate(body: ActivateIn):
@@ -463,10 +490,6 @@ def license_activate(body: ActivateIn):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"activate_error: {e.__class__.__name__}: {e}")
 
-class ValidateIn(BaseModel):
-    token: str = Field(min_length=1)
-    hwid:  str = Field(min_length=1)
-
 @app.post("/license/validate")
 def license_validate(body: ValidateIn):
     hwid = body.hwid.strip()
@@ -480,10 +503,6 @@ def license_validate(body: ValidateIn):
         return {"ok": True, "tier": tier,
                 "download_url": DOWNLOAD_URL_PRO if tier == "pro" else "",
                 "addons_url": ADDONS_URL if tier == "pro" else ""}
-
-class IntrospectIn(BaseModel):
-    token: str = Field(min_length=1)
-    hwid: Optional[str] = None
 
 @app.post("/token/introspect")
 def token_introspect(body: IntrospectIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):
@@ -501,7 +520,7 @@ def token_introspect(body: IntrospectIn, request: Request, secret: Optional[str]
             exp = None
         now_ts = now()
         ttl = None if exp is None else max(0, int(exp) - now_ts)
-        out = {
+        out: Dict[str, Any] = {
             "ok": True,
             "token": row["token"],
             "tier": str(row["tier"] or "pro").lower(),
@@ -529,9 +548,6 @@ def token_introspect(body: IntrospectIn, request: Request, secret: Optional[str]
                 })
             }
     return out
-
-class RevokeIn(BaseModel):
-    token: str = Field(min_length=1)
 
 @app.post("/token/revoke")
 def token_revoke(body: RevokeIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):
@@ -616,9 +632,11 @@ async def gumroad_webhook(request: Request):
         )
 
     if email:
+        # Prefer your /download route (simpler than hardcoding a file)
+        download_hint = DOWNLOAD_URL_PRO or (DOMAIN + "/download")
         instructions = (
             f"Thanks for buying Glass {tier.title()}!\n\n"
-            f"Download: {DOWNLOAD_URL_PRO or (DOMAIN + '/static/GlassSetup.exe')}\n"
+            f"Download: {download_hint}\n"
             f"Your license key: {key}\n\n"
             f"Activate: Open Glass -> Pro -> Enter license...\n"
             f"Pro gives you up to {maxc} active windows, Ghost Clicks, and Topmost.\n\n"
@@ -660,3 +678,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
+
