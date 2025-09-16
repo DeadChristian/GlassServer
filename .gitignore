@@ -13,3 +13,9 @@ glass.db
 /app/*.spec
 /app/__pycache__/
 /app/.venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+GlassServer/.env
+GlassServer/data/
