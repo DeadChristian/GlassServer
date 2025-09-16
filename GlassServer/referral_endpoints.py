@@ -132,3 +132,5 @@ def verify(p: VerifyPayload):
         "ok": True, "valid": True, "tier": tier,
         "max_windows": MAX_WINDOWS[tier], "message": f"{tier} plan"
     }
+
+

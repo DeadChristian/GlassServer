@@ -1,4 +1,4 @@
-﻿# theme.py — modular ttk theme tokens + cached JSON loader + richer widget styles
+# theme.py � modular ttk theme tokens + cached JSON loader + richer widget styles
 from __future__ import annotations
 import json, os
 from pathlib import Path
@@ -209,3 +209,5 @@ def set_theme(root: tk.Misc, name: str, *, force_black_text: bool = False) -> di
         used["fg"] = "#000000"
         used["fg_subtle"] = "#000000"
     return used
+
+

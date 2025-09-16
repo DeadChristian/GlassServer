@@ -1,4 +1,4 @@
-﻿# main.py â€” FastAPI for Glass (desktop licensing + public-config)
+# main.py — FastAPI for Glass (desktop licensing + public-config)
 # Endpoints: /public-config, /verify, /license/activate, /ref/create
 from contextlib import closing
 from pathlib import Path
@@ -204,7 +204,7 @@ def public_config(response: Response):
                        or os.getenv("BUY_URL")
                        or "https://www.glassapp.me/buy?tier=pro")
 
-    intro_active    = _env_on("INTRO_ACTIVE", "1")        # "$5 first month â†’ then $9.99"
+    intro_active    = _env_on("INTRO_ACTIVE", "1")        # "$5 first month → then $9.99"
     price_intro     = os.getenv("PRICE_INTRO", "5")
     referrals_on    = _env_on("REFERRALS_ENABLED", "1")
 
@@ -330,7 +330,7 @@ def admin_sale_by_id(sale_id: str, secret: str):
 @app.post("/admin/test-email")
 def admin_test_email(to: str = Query(...), secret: str = Query(...)):
     _check_admin(secret)
-    send_mail(to, "Glass test", "It works! â€“ Glass")
+    send_mail(to, "Glass test", "It works! – Glass")
     return {"ok": True}
 
 # -------------------- Routers & 404 for /launch ------------------------------
@@ -354,3 +354,5 @@ async def not_found(request: Request, exc):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
+

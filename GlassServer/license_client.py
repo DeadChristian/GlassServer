@@ -45,3 +45,5 @@ def validate(timeout: float = 5.0) -> dict:
     if data.get("ok"):
         data["max_windows"] = DEFAULT_CAPS.get(data["tier"], 1)
     return data
+
+

@@ -1,4 +1,4 @@
-ï»¿# theme_designer.py â€” simpler Theme Designer (hex-validated, contrast-aware, no black-text toggles)
+# theme_designer.py — simpler Theme Designer (hex-validated, contrast-aware, no black-text toggles)
 from __future__ import annotations
 import json, os, re
 import tkinter as tk
@@ -52,7 +52,7 @@ def _norm_hex(s: str, fallback: str = "#000000") -> str:
     if not s.startswith("#"):
         s = "#" + s
     if _HEX_RE.fullmatch(s):
-        if len(s) == 4:  # expand #abc â†’ #aabbcc
+        if len(s) == 4:  # expand #abc ? #aabbcc
             s = "#" + "".join(ch * 2 for ch in s[1:])
         return s.lower()
     return fallback
@@ -77,11 +77,11 @@ def _contrast_ratio(fg_hex: str, bg_hex: str) -> float:
 class ThemeDesigner(ttk.Frame):
     """
     Simple, friendly theme editor:
-      â€¢ Validates hex values (#rrggbb or #rgb)
-      â€¢ One-click color pickers
-      â€¢ Live preview (header/body/button)
-      â€¢ Contrast ratio readout (WCAG-ish)
-      â€¢ Quick presets dropdown
+      • Validates hex values (#rrggbb or #rgb)
+      • One-click color pickers
+      • Live preview (header/body/button)
+      • Contrast ratio readout (WCAG-ish)
+      • Quick presets dropdown
     """
     def __init__(
         self,
@@ -142,7 +142,7 @@ class ThemeDesigner(ttk.Frame):
         ctr.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
         ctr.columnconfigure(1, weight=1)
         ttk.Label(ctr, text="Contrast (fg/bg):", style="Subtle.TLabel").grid(row=0, column=0, sticky="w")
-        self.contrast_val = ttk.Label(ctr, text="â€”", style="TLabel")
+        self.contrast_val = ttk.Label(ctr, text="—", style="TLabel")
         self.contrast_val.grid(row=0, column=1, sticky="w", padx=(6, 0))
 
         # Actions
@@ -150,7 +150,7 @@ class ThemeDesigner(ttk.Frame):
         row.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 10))
         ttk.Button(row, text="Apply (Live)", command=self._apply_live).pack(side="left")
         ttk.Button(row, text="Save", command=self._save).pack(side="left", padx=(8, 0))
-        ttk.Button(row, text="Loadâ€¦", command=self._load_from_file).pack(side="left", padx=(8, 0))
+        ttk.Button(row, text="Load…", command=self._load_from_file).pack(side="left", padx=(8, 0))
 
         self._apply_live()  # initial preview
 
@@ -262,3 +262,5 @@ def open_theme_designer_dialog(parent, current_theme: str, on_saved=None, on_app
     btns = ttk.Frame(win); btns.pack(fill="x", padx=10, pady=10)
     ttk.Button(btns, text="Close", command=win.destroy).pack(side="right")
     return win
+
+

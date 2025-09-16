@@ -15,3 +15,5 @@ def unsign_action(secret: str, token: str, max_age=None) -> str:
 
 def sign_action(secret: str, msg="pro-upgrade") -> str:
     return "signed-token"
+
+

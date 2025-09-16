@@ -14,3 +14,5 @@ except Exception as e:
         print("Note: couldn't add column (it probably already exists).")
         print("First error:", repr(e))
         print("Second error:", repr(e2))
+
+

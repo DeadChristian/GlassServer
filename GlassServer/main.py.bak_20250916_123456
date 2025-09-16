@@ -1,5 +1,4 @@
-from __future__ import annotations
-# GlassServer/main.py
+﻿# GlassServer/main.py
 from __future__ import annotations
 
 import os
@@ -266,5 +265,3 @@ def head_addons_latest():
 # webhook_router = APIRouter()
 # @webhook_router.post("") def gumroad_webhook(payload: dict): return {"ok": True}
 # app.include_router(webhook_router, prefix="/gumroad/webhook", tags=["webhook"])
-
-
