@@ -25,3 +25,6 @@ __pycache__/
 .env
 GlassServer/.env
 GlassServer/data/
+
+GlassServer/main.py.bak_*
+
