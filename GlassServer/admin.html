@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Glass Admin (lite)</title>
+  <style>
+    body { font: 14px/1.4 system-ui, sans-serif; max-width: 900px; margin: 40px auto; }
+    input, button { padding: 8px; font: inherit; }
+    .row { margin: 10px 0; }
+    code { background: #f7f7f7; padding: 2px 4px; }
+  </style>
+</head>
+<body>
+  <h1>Glass Admin</h1>
+  <p>Use API directly for writes. Examples:</p>
+  <div class="row">
+    <code>POST /admin/upgrade-to-pro?hwid=HWID&admin_secret=ADMIN_SECRET</code>
+  </div>
+  <hr/>
+  <p>For full stats, query the DB on server. Keep this page behind your reverse-proxy auth too.</p>
+</body>
+</html>

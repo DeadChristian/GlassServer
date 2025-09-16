@@ -1,0 +1,3 @@
+
+/* Apply grayscale to images site-wide */
+img, .logo { filter: grayscale(100%); }

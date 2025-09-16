@@ -1,0 +1,28 @@
+﻿# ===== Core =====
+DOMAIN=https://www.glassapp.me
+APP_VERSION=1.0.0
+DB_PATH=glass.db
+ADMIN_SECRET=[REDACTED]
+
+# ===== Gumroad (Ping mode) =====
+GUMROAD_WEBHOOK_SECRET=[REDACTED]
+GUMROAD_SELLER_ID=35jfkkB1DQbR7qxFrQO5Cw==
+GUMROAD_PRODUCT_IDS=xvphp,kisnxu
+SKIP_GUMROAD_VALIDATION=true
+
+# ===== Public config consumed by the desktop app =====
+STARTER_SALES_ENABLED=1
+STARTER_PRICE=5
+STARTER_BUY_URL=https://gumroad.com/l/kisnxu
+PRO_SALES_ENABLED=1
+PRO_PRICE=9.99
+PRO_BUY_URL=https://gumroad.com/l/xvphp
+PRO_MAX_WINDOWS=5
+
+INTRO_ACTIVE=1
+PRICE_INTRO=5
+REFERRALS_ENABLED=1
+LAUNCH_URL=https://www.glassapp.me/launch
+
+DRY_RUN=false
+DEBUG=false

@@ -1,0 +1,15 @@
+﻿__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.log
+.env
+.env.*
+glass.db
+# App build outputs
+/app/build/
+/app/dist/
+/app/*.spec
+/app/__pycache__/
+/app/.venv/

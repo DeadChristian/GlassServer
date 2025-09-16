@@ -1,0 +1,3 @@
+git add Procfile runtime.txt requirements.txt
+git commit -m "Add Procfile, runtime, and requirements for deployment"
+git push
