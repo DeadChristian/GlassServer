@@ -52,12 +52,15 @@ SMTP_TLS  = os.getenv("SMTP_TLS", "1") in ("1", "true", "True")
 now = lambda: int(time.time())
 
 # ===================== App =====================
-# redirect_slashes=False prevents /download -> /download/ 308s (which break files)
+# redirect_slashes=False prevents 308s (/download -> /download/)
 app = FastAPI(title="GlassServer", version=APP_VERSION, redirect_slashes=False)
 
+# CORS: allow only your site unless DEBUG=true
+ALLOW_ALL = str(os.getenv("DEBUG", "false")).lower() in ("1", "true", "yes")
+ALLOWED_ORIGINS = ["https://www.glassapp.me"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=(["*"] if ALLOW_ALL else ALLOWED_ORIGINS),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -141,10 +144,17 @@ def _init_db() -> None:
         );""")
         con.execute("CREATE INDEX IF NOT EXISTS idx_tokens_token ON license_tokens(token);")
         con.execute("CREATE INDEX IF NOT EXISTS idx_tokens_hwid  ON license_tokens(hwid);")
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          kind TEXT NOT NULL,
+          path TEXT NOT NULL,
+          ts   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );""")
 
 _init_db()
 
-# ===================== Pydantic models =====================
+# ===================== Models =====================
 class IssueIn(BaseModel):
     max_concurrent: int = Field(default=5, ge=1, le=50)
     max_activations: int = Field(default=1, ge=1, le=50)
@@ -232,6 +242,168 @@ def _require_admin(secret_qs: Optional[str], request: Request) -> None:
 def AdminGuard(request: Request, secret: Optional[str] = Query(None)):
     _require_admin(secret, request)
 
+def _log_event(kind: str, path: str) -> None:
+    try:
+        with closing(_db()) as con, con:
+            con.execute("INSERT INTO events(kind, path) VALUES (?,?)", (kind, path))
+    except Exception:
+        pass
+
+# ===================== Site routes =====================
+@app.get("/", include_in_schema=False)
+def root():
+    return FileResponse(str(WEB_DIR / "index.html"), media_type="text/html")
+
+@app.head("/", include_in_schema=False)
+def head_root():
+    return Response(status_code=200)
+
+@app.get("/privacy.html", include_in_schema=False)
+def privacy_page():
+    return FileResponse(str(WEB_DIR / "privacy.html"), media_type="text/html")
+
+@app.get("/help.html", include_in_schema=False)
+def help_page():
+    return FileResponse(str(WEB_DIR / "help.html"), media_type="text/html")
+
+@app.get("/terms.html", include_in_schema=False)
+def terms_page():
+    p = WEB_DIR / "terms.html"
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="terms.html not found in /web")
+    return FileResponse(str(p), media_type="text/html")
+
+# GET/HEAD download without redirect loops
+@app.api_route("/download", methods=["GET", "HEAD"], include_in_schema=False)
+def download(request: Request):
+    for name in ("Glass.exe", "GlassSetup.exe"):
+        p = STATIC_DIR / name
+        if p.exists():
+            if request.method == "HEAD":
+                return Response(
+                    status_code=200,
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "Content-Disposition": f'attachment; filename="{name}"',
+                        "Cache-Control": "public, max-age=604800, immutable",
+                    },
+                )
+            _log_event("download", "/download")
+            return FileResponse(
+                str(p),
+                media_type="application/octet-stream",
+                filename=name,
+                headers={"Cache-Control": "public, max-age=604800, immutable"},
+            )
+    raise HTTPException(status_code=404, detail="Installer not found in /web/static")
+
+# Accept /download/ too
+@app.api_route("/download/", methods=["GET", "HEAD"], include_in_schema=False)
+def download_slash(request: Request):
+    return download(request)
+
+# Back-compat alias: /download/latest -> /download
+@app.api_route("/download/latest", methods=["GET", "HEAD"], include_in_schema=False)
+def download_latest(request: Request):
+    return download(request)
+
+# Addons ZIP with HEAD
+@app.api_route("/addons/latest", methods=["GET", "HEAD"], include_in_schema=False)
+def addons_latest(request: Request):
+    name = "pro_addons_v1.zip"
+    p = STATIC_DIR / name
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="addons zip not found")
+    if request.method == "HEAD":
+        return Response(
+            status_code=200,
+            headers={
+                "Content-Type": "application/zip",
+                "Content-Disposition": f'attachment; filename="{name}"',
+                "Cache-Control": "public, max-age=604800, immutable",
+            },
+        )
+    _log_event("download", "/addons/latest")
+    return FileResponse(
+        str(p),
+        media_type="application/zip",
+        filename=name,
+        headers={"Cache-Control": "public, max-age=604800, immutable"},
+    )
+
+@app.get("/launch", include_in_schema=False)
+def launch():
+    return RedirectResponse(url="/download", status_code=307)
+
+@app.get("/robots.txt", include_in_schema=False)
+def robots_txt():
+    domain = (DOMAIN or "https://glassapp.me").rstrip("/")
+    body = f"User-agent: *\nAllow: /\nSitemap: {domain}/sitemap.xml\n"
+    return PlainTextResponse(body, media_type="text/plain; charset=utf-8")
+
+@app.get("/sitemap.xml", include_in_schema=False)
+def sitemap_xml():
+    domain = (DOMAIN or "https://glassapp.me").rstrip("/")
+    urls = [f"{domain}/", f"{domain}/privacy.html", f"{domain}/help.html", f"{domain}/terms.html", f"{domain}/download"]
+    xml = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for u in urls:
+        xml += ["  <url>", f"    <loc>{u}</loc>", "  </url>"]
+    xml.append("</urlset>")
+    return Response("\n".join(xml), media_type="application/xml")
+
+@app.get("/static-list")
+def static_list():
+    try:
+        files = sorted(p.name for p in STATIC_DIR.iterdir()) if STATIC_DIR.exists() else []
+        return {"root": str(ROOT), "static": str(STATIC_DIR), "exists": STATIC_DIR.exists(), "files": files}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok", "version": APP_VERSION, "static_dir": str(STATIC_DIR)}
+
+# The public config shape the client expects
+@app.get("/config")
+def config(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "domain": DOMAIN or "https://www.glassapp.me",
+        "version": APP_VERSION,
+        "token_ttl_days": TOKEN_TTL_DAYS,
+        "download_url_pro": DOWNLOAD_URL_PRO,
+        "addons_url": ADDONS_URL,
+        "addons_version": os.getenv("ADDONS_VERSION", "1.0.0"),
+        "sales": {
+            "starter_enabled": str(os.getenv("STARTER_SALES_ENABLED", "0")).lower() in ("1", "true"),
+            "starter_price": os.getenv("STARTER_PRICE", "5"),
+            "starter_buy_url": os.getenv("STARTER_BUY_URL", ""),
+            "pro_enabled":     str(os.getenv("PRO_SALES_ENABLED", "1")).lower() in ("1", "true"),
+            "pro_price":       os.getenv("PRO_PRICE", "5"),
+            "pro_buy_url":     PRO_BUY_URL,
+        },
+        "limits": {
+            "free_max_windows": FREE_MAX_WINDOWS,
+            "starter_max_windows": STARTER_MAX_WINDOWS,
+            "pro_max_windows": PRO_MAX_WINDOWS,
+        },
+        "intro": {"active": str(os.getenv("INTRO_ACTIVE", "1")).lower() in ("1", "true"),
+                  "price_intro": os.getenv("PRICE_INTRO", "5")},
+        "referrals_enabled": str(os.getenv("REFERRALS_ENABLED", "1")).lower() in ("1", "true"),
+        "launch_url": os.getenv("LAUNCH_URL", f"{DOMAIN}/launch" if DOMAIN else "/launch"),
+        "skip_gumroad_validation": str(os.getenv("SKIP_GUMROAD_VALIDATION", "false")).lower() in ("1","true"),
+        "dry_run": str(os.getenv("DRY_RUN", "false")).lower() in ("1","true"),
+        "debug": str(os.getenv("DEBUG", "false")).lower() in ("1","true"),
+    }
+
+# alias for older clients, if any
+@app.get("/public-config", include_in_schema=False)
+def public_config_alias(response: Response):
+    return config(response)
+
+# ===================== License & token routes =====================
+class _NoAuth(Exception): pass
+
 def _email_plain(to_email: str, subject: str, body: str) -> None:
     if not to_email:
         return
@@ -274,108 +446,13 @@ def _email_plain(to_email: str, subject: str, body: str) -> None:
 
     print(f"[EMAIL_DISABLED]\nTo: {to_email}\nSubj: {subject}\n{body}")
 
-# ===================== Site routes =====================
-@app.get("/", include_in_schema=False)
-def root():
-    return FileResponse(str(WEB_DIR / "index.html"), media_type="text/html")
+class IssueInOut(BaseModel):
+    max_concurrent: int = 5
+    max_activations: int = 1
+    tier: str = "pro"
+    email: Optional[str] = None
+    prefix: str = "GL"
 
-@app.head("/", include_in_schema=False)
-def head_root():
-    return Response(status_code=200)
-
-@app.get("/privacy.html", include_in_schema=False)
-def privacy_page():
-    return FileResponse(str(WEB_DIR / "privacy.html"), media_type="text/html")
-
-@app.get("/help.html", include_in_schema=False)
-def help_page():
-    return FileResponse(str(WEB_DIR / "help.html"), media_type="text/html")
-
-@app.get("/terms.html", include_in_schema=False)
-def terms_page():
-    p = WEB_DIR / "terms.html"
-    if not p.exists():
-        raise HTTPException(status_code=404, detail="terms.html not found in /web")
-    return FileResponse(str(p), media_type="text/html")
-
-# GET/HEAD download with no trailing-slash redirect loop
-@app.api_route("/download", methods=["GET", "HEAD"], include_in_schema=False)
-def download(request: Request):
-    for name in ("Glass.exe", "GlassSetup.exe"):
-        p = STATIC_DIR / name
-        if p.exists():
-            if request.method == "HEAD":
-                return Response(
-                    status_code=200,
-                    headers={
-                        "Content-Type": "application/octet-stream",
-                        "Content-Disposition": f'attachment; filename="{name}"',
-                    },
-                )
-            return FileResponse(str(p), media_type="application/octet-stream", filename=name)
-    raise HTTPException(status_code=404, detail="Installer not found in /web/static")
-
-# Accept /download/ too (no redirect)
-@app.api_route("/download/", methods=["GET", "HEAD"], include_in_schema=False)
-def download_slash(request: Request):
-    return download(request)
-
-@app.get("/launch", include_in_schema=False)
-def launch():
-    return RedirectResponse(url="/download", status_code=307)
-
-@app.get("/robots.txt", include_in_schema=False)
-def robots_txt():
-    domain = (DOMAIN or "https://glassapp.me").rstrip("/")
-    body = f"User-agent: *\nAllow: /\nSitemap: {domain}/sitemap.xml\n"
-    return PlainTextResponse(body, media_type="text/plain; charset=utf-8")
-
-@app.get("/sitemap.xml", include_in_schema=False)
-def sitemap_xml():
-    domain = (DOMAIN or "https://glassapp.me").rstrip("/")
-    urls = [f"{domain}/", f"{domain}/privacy.html", f"{domain}/help.html", f"{domain}/terms.html", f"{domain}/download"]
-    xml = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
-    for u in urls:
-        xml += ["  <url>", f"    <loc>{u}</loc>", "  </url>"]
-    xml.append("</urlset>")
-    return Response("\n".join(xml), media_type="application/xml")
-
-@app.get("/static-list")
-def static_list():
-    try:
-        files = sorted(p.name for p in STATIC_DIR.iterdir()) if STATIC_DIR.exists() else []
-        return {"root": str(ROOT), "static": str(STATIC_DIR), "exists": STATIC_DIR.exists(), "files": files}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/healthz")
-def healthz():
-    return {"ok": True}
-
-@app.get("/public-config")
-def public_config(response: Response):
-    response.headers["Cache-Control"] = "no-store"
-    return {
-        "app": "glass",
-        "starter_sales_enabled": os.getenv("STARTER_SALES_ENABLED", "1") in ("1", "true", "True"),
-        "starter_price": os.getenv("STARTER_PRICE", "5"),
-        "starter_buy_url": os.getenv("STARTER_BUY_URL", "https://gumroad.com/l/kisnxu"),
-        "pro_sales_enabled": os.getenv("PRO_SALES_ENABLED", "1") in ("1", "true", "True"),
-        "pro_price": os.getenv("PRO_PRICE", "9.99"),
-        "pro_buy_url": PRO_BUY_URL,
-        "intro_active": os.getenv("INTRO_ACTIVE", "1") in ("1", "true", "True"),
-        "price_intro": os.getenv("PRICE_INTRO", "5"),
-        "referrals_enabled": os.getenv("REFERRALS_ENABLED", "1") in ("1", "true", "True"),
-        "download_url_pro": DOWNLOAD_URL_PRO,
-        "addons_url": ADDONS_URL,
-        "launch_url": os.getenv("LAUNCH_URL", ""),
-    }
-
-@app.get("/buy")
-def buy_redirect(tier: str = "pro"):
-    return RedirectResponse(url=PRO_BUY_URL, status_code=307)
-
-# ===================== License & token routes =====================
 @app.post("/license/issue")
 def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):
     _require_admin(secret, request)
@@ -396,7 +473,6 @@ def license_activate(body: ActivateIn):
         key  = body.key.strip().upper()
         _init_db()
 
-        # Legacy prefixes
         if key.startswith("PRO-"):
             tier = "pro"
             with closing(_db()) as con, con:
@@ -415,7 +491,6 @@ def license_activate(body: ActivateIn):
                     "max_concurrent": STARTER_MAX_WINDOWS,
                     "download_url": "", "addons_url": ""}
 
-        # DB-backed keys
         with closing(_db()) as con, con:
             rec = con.execute("SELECT * FROM licenses WHERE license_key=?", (key,)).fetchone()
             if not rec:
