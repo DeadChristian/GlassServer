@@ -4,45 +4,45 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 
-# robust .env loading for both repo and package folder
+# --- .env loading (safe if package missing) ---
 try:
     from dotenv import load_dotenv  # python-dotenv
     here = Path(__file__).resolve()
-    load_dotenv(here.with_name(".env"), override=False)
-    # also try repo-root .env (one directory up)
-    load_dotenv(here.parent.parent / ".env", override=False)
+    load_dotenv(here.with_name(".env"), override=False)          # GlassServer/.env
+    load_dotenv(here.parent.parent / ".env", override=False)     # repo root .env
 except Exception:
     pass
 
-# Pydantic v2 settings (works on 3.9+ if we avoid "|" unions)
+# --- pydantic-settings (v2) ---
 try:
     from pydantic_settings import BaseSettings
-except Exception as e:  # fallback message if dependency missing
-    raise RuntimeError(
-        "Missing dependency 'pydantic-settings'. Add it to requirements.txt"
-    ) from e
+except Exception as e:
+    raise RuntimeError("Missing dependency 'pydantic-settings'. Add it to requirements.txt") from e
 
 
 BASE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = BASE_DIR / "web" / "static"
+WEB_DIR = BASE_DIR / "web"
+STATIC_DIR = WEB_DIR / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-REQUIRED_STATIC = {
+# Files we expect to be present in /web/static
+REQUIRED_STATIC: Dict[str, str] = {
     "Glass.exe": "application/octet-stream",
     "og.png": "image/png",
     "pro_addons_v1.zip": "application/zip",
 }
 
 
-def _to_bool(val: Optional[str], default: bool) -> bool:
-    if val is None:
+def _to_bool(v: Optional[str], default: bool) -> bool:
+    if v is None:
         return default
-    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 class Settings(BaseSettings):
@@ -77,8 +77,6 @@ class Settings(BaseSettings):
     DRY_RUN: bool = _to_bool(os.getenv("DRY_RUN"), False)
     DEBUG: bool = _to_bool(os.getenv("DEBUG"), False)
 
-    # Non-public/ignored here: DB_PATH, ADMIN_SECRET, etc.
-
     def public_config(self) -> Dict[str, Any]:
         return {
             "domain": self.DOMAIN,
@@ -111,16 +109,22 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return Settings()  # reads env once and caches
+    return Settings()
 
 
 app = FastAPI(title="GlassServer", version=get_settings().APP_VERSION)
 
+# Serve /static/* directly (so links in /static-check work)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+
+# ---------------------------
+# Basic pages / diagnostics
+# ---------------------------
 @app.get("/", response_class=HTMLResponse)
-async def root(request: Request) -> HTMLResponse:
+async def root(_req: Request) -> HTMLResponse:
     return HTMLResponse(
-        f"""<!doctype html>
+        """<!doctype html>
 <meta charset="utf-8" />
 <title>GlassServer ✓ OK</title>
 <h1>GlassServer is running ✓</h1>
@@ -135,9 +139,7 @@ async def root(request: Request) -> HTMLResponse:
 
 @app.get("/healthz")
 async def healthz() -> JSONResponse:
-    return JSONResponse(
-        {"status": "ok", "version": get_settings().APP_VERSION, "static_dir": str(STATIC_DIR)}
-    )
+    return JSONResponse({"status": "ok", "version": get_settings().APP_VERSION, "static_dir": str(STATIC_DIR)})
 
 
 @app.get("/config")
@@ -147,63 +149,77 @@ async def config() -> JSONResponse:
 
 @app.get("/static-list")
 async def static_list() -> JSONResponse:
-    items = []
+    files: List[Dict[str, Any]] = []
     if STATIC_DIR.exists():
         for p in sorted(STATIC_DIR.iterdir()):
             if p.is_file():
-                items.append({"name": p.name, "size_bytes": p.stat().st_size})
-    return JSONResponse({"count": len(items), "files": items})
+                files.append({"name": p.name, "size_bytes": p.stat().st_size})
+    return JSONResponse({"count": len(files), "files": files})
 
 
 @app.get("/static-check")
 async def static_check() -> JSONResponse:
-    files = {}
-    for name in REQUIRED_STATIC:
-        path = STATIC_DIR / name
-        files[name] = {
-            "exists": path.exists(),
-            "size_bytes": path.stat().st_size if path.exists() else 0,
-            "href": f"/static/{name}",
-        }
-    missing = [n for n, info in files.items() if not info["exists"]]
+    files: Dict[str, Any] = {}
+    for name, _mime in REQUIRED_STATIC.items():
+        p = STATIC_DIR / name
+        files[name] = {"exists": p.exists(), "size_bytes": (p.stat().st_size if p.exists() else 0), "href": f"/static/{name}"}
+    missing = [n for n, meta in files.items() if not meta["exists"]]
     return JSONResponse({"ok": len(missing) == 0, "missing": missing, "files": files})
 
 
-def _head_only_headers(filename: str, mime: str) -> Dict[str, str]:
-    # headers for HEAD response w/o body
-    return {
+# ---------------------------
+# Downloads (GET + HEAD)
+# ---------------------------
+def _attachment_headers(filename: str, mime: str, size: Optional[int]) -> Dict[str, str]:
+    h = {
         "Content-Disposition": f'attachment; filename="{filename}"',
         "Content-Type": mime,
         "Accept-Ranges": "bytes",
     }
-
-
-def _send_file_or_404(name: str, mime_fallback: str) -> FileResponse:
-    path = STATIC_DIR / name
-    if not path.exists():
-        raise HTTPException(status_code=404, detail=f"{name} not found")
-    return FileResponse(path, filename=name, media_type=mime_fallback)
+    if size is not None:
+        h["Content-Length"] = str(size)
+    return h
 
 
 @app.api_route("/download/latest", methods=["GET", "HEAD"])
 async def download_latest(request: Request):
     name = "Glass.exe"
-    mime = REQUIRED_STATIC.get(name, "application/octet-stream")
+    mime = REQUIRED_STATIC[name]
+    p = STATIC_DIR / name
+    if not p.exists():
+        raise HTTPException(404, f"{name} not found")
+
     if request.method == "HEAD":
-        return Response(status_code=200, headers=_head_only_headers(name, mime))
-    return _send_file_or_404(name, mime)
+        return Response(status_code=200, headers=_attachment_headers(name, mime, p.stat().st_size))
+
+    return FileResponse(
+        path=p,
+        media_type=mime,
+        filename=name,
+        headers=_attachment_headers(name, mime, None),
+    )
 
 
 @app.api_route("/addons/latest", methods=["GET", "HEAD"])
 async def addons_latest(request: Request):
     name = "pro_addons_v1.zip"
-    mime = REQUIRED_STATIC.get(name, "application/zip")
+    mime = REQUIRED_STATIC[name]
+    p = STATIC_DIR / name
+    if not p.exists():
+        raise HTTPException(404, f"{name} not found")
+
     if request.method == "HEAD":
-        return Response(status_code=200, headers=_head_only_headers(name, mime))
-    return _send_file_or_404(name, mime)
+        return Response(status_code=200, headers=_attachment_headers(name, mime, p.stat().st_size))
+
+    return FileResponse(
+        path=p,
+        media_type=mime,
+        filename=name,
+        headers=_attachment_headers(name, mime, None),
+    )
 
 
-# Optional plaintext 404 (keeps logs clearer on Railway)
+# Optional: clearer 404
 @app.exception_handler(404)
-async def not_found(_req: Request, exc: HTTPException):
+async def not_found(_req: Request, _exc: HTTPException):
     return PlainTextResponse("Not Found", status_code=404)
