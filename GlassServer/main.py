@@ -1,5 +1,7 @@
 ﻿# main.py — GlassServer (ASCII only)
 
+from __future__ import annotations
+
 import os
 import sqlite3
 import time
@@ -34,7 +36,7 @@ PRO_MAX_WINDOWS     = int(os.getenv("PRO_MAX_WINDOWS", "5"))
 
 PRO_BUY_URL = os.getenv("PRO_BUY_URL", "https://gumroad.com/l/xvphp").strip()
 
-# Gumroad + email (optional)
+# Gumroad / email (optional)
 GUMROAD_WEBHOOK_SECRET  = os.getenv("GUMROAD_WEBHOOK_SECRET", "").strip()
 GUMROAD_SELLER_ID       = os.getenv("GUMROAD_SELLER_ID", "").strip()
 GUMROAD_PRODUCT_PRO     = os.getenv("GUMROAD_PRODUCT_PRO", "").strip()
@@ -359,11 +361,32 @@ def static_list():
     except Exception as e:
         return {"error": str(e)}
 
+# NEW: static-check (used by your tests + health dashboards)
+@app.get("/static-check")
+def static_check():
+    def info(name: str):
+        p = STATIC_DIR / name
+        return {
+            "exists": p.exists(),
+            "size_bytes": (p.stat().st_size if p.exists() else 0),
+            "href": f"/static/{name}",
+        }
+    payload = {
+        "ok": True,
+        "missing": [n for n in ("Glass.exe", "og.png", "pro_addons_v1.zip") if not (STATIC_DIR / n).exists()],
+        "files": {
+            "Glass.exe": info("Glass.exe"),
+            "og.png": info("og.png"),
+            "pro_addons_v1.zip": info("pro_addons_v1.zip"),
+        },
+    }
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok", "version": APP_VERSION, "static_dir": str(STATIC_DIR)}
 
-# The public config shape the client expects
+# Public config consumed by the client
 @app.get("/config")
 def config(response: Response):
     response.headers["Cache-Control"] = "no-store"
@@ -396,13 +419,18 @@ def config(response: Response):
         "debug": str(os.getenv("DEBUG", "false")).lower() in ("1","true"),
     }
 
-# alias for older clients, if any
 @app.get("/public-config", include_in_schema=False)
 def public_config_alias(response: Response):
     return config(response)
 
 # ===================== License & token routes =====================
-class _NoAuth(Exception): pass
+class _NoAuth(Exception): ...
+class IssueInOut(BaseModel):
+    max_concurrent: int = 5
+    max_activations: int = 1
+    tier: str = "pro"
+    email: Optional[str] = None
+    prefix: str = "GL"
 
 def _email_plain(to_email: str, subject: str, body: str) -> None:
     if not to_email:
@@ -446,13 +474,6 @@ def _email_plain(to_email: str, subject: str, body: str) -> None:
 
     print(f"[EMAIL_DISABLED]\nTo: {to_email}\nSubj: {subject}\n{body}")
 
-class IssueInOut(BaseModel):
-    max_concurrent: int = 5
-    max_activations: int = 1
-    tier: str = "pro"
-    email: Optional[str] = None
-    prefix: str = "GL"
-
 @app.post("/license/issue")
 def license_issue(body: IssueIn, request: Request, secret: Optional[str] = Query(None), _admin: None = Depends(AdminGuard)):
     _require_admin(secret, request)
@@ -473,6 +494,7 @@ def license_activate(body: ActivateIn):
         key  = body.key.strip().upper()
         _init_db()
 
+        # Local pseudo-keys for testing/ops
         if key.startswith("PRO-"):
             tier = "pro"
             with closing(_db()) as con, con:
@@ -491,6 +513,7 @@ def license_activate(body: ActivateIn):
                     "max_concurrent": STARTER_MAX_WINDOWS,
                     "download_url": "", "addons_url": ""}
 
+        # Real licenses
         with closing(_db()) as con, con:
             rec = con.execute("SELECT * FROM licenses WHERE license_key=?", (key,)).fetchone()
             if not rec:
@@ -625,8 +648,7 @@ async def gumroad_webhook(request: Request):
             def first(*keys):
                 for k in keys:
                     v = parsed.get(k)
-                    if v and len(v) > 0:
-                        return v[0]
+                    if v and len(v) > 0: return v[0]
                 return ""
             seller_id   = first("seller_id")
             email       = (first("email", "purchaser_email") or "").strip().lower()
@@ -640,8 +662,7 @@ async def gumroad_webhook(request: Request):
             def fget(*keys):
                 for k in keys:
                     v = form.get(k)
-                    if v:
-                        return str(v)
+                    if v: return str(v)
                 return ""
             seller_id   = fget("seller_id")
             email       = (fget("email", "purchaser_email") or "").strip().lower()
