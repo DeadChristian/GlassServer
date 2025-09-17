@@ -1,12 +1,11 @@
-﻿# GlassServer/main.py
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -46,7 +45,6 @@ def _to_bool(v: Optional[str], default: bool) -> bool:
 
 
 class Settings(BaseSettings):
-    # Public
     DOMAIN: str = os.getenv("DOMAIN", "https://www.glassapp.me")
     APP_VERSION: str = os.getenv("APP_VERSION", "1.0.0")
     TOKEN_TTL_DAYS: int = int(os.getenv("TOKEN_TTL_DAYS", "90"))
@@ -168,54 +166,33 @@ async def static_check() -> JSONResponse:
 
 
 # ---------------------------
-# Downloads (GET + HEAD)
+# Downloads (GET + HEAD) — use FileResponse for BOTH so HEAD keeps Content-Length
 # ---------------------------
-def _attachment_headers(filename: str, mime: str, size: Optional[int]) -> Dict[str, str]:
-    h = {
-        "Content-Disposition": f'attachment; filename="{filename}"',
-        "Content-Type": mime,
-        "Accept-Ranges": "bytes",
-    }
-    if size is not None:
-        h["Content-Length"] = str(size)
-    return h
-
-
 @app.api_route("/download/latest", methods=["GET", "HEAD"])
-async def download_latest(request: Request):
+async def download_latest(_req: Request):
     name = "Glass.exe"
-    mime = REQUIRED_STATIC[name]
     p = STATIC_DIR / name
     if not p.exists():
         raise HTTPException(404, f"{name} not found")
-
-    if request.method == "HEAD":
-        return Response(status_code=200, headers=_attachment_headers(name, mime, p.stat().st_size))
-
     return FileResponse(
         path=p,
-        media_type=mime,
-        filename=name,
-        headers=_attachment_headers(name, mime, None),
+        media_type="application/octet-stream",
+        filename=name,                     # sets Content-Disposition: attachment
+        headers={"Accept-Ranges": "bytes"} # nice-to-have
     )
 
 
 @app.api_route("/addons/latest", methods=["GET", "HEAD"])
-async def addons_latest(request: Request):
+async def addons_latest(_req: Request):
     name = "pro_addons_v1.zip"
-    mime = REQUIRED_STATIC[name]
     p = STATIC_DIR / name
     if not p.exists():
         raise HTTPException(404, f"{name} not found")
-
-    if request.method == "HEAD":
-        return Response(status_code=200, headers=_attachment_headers(name, mime, p.stat().st_size))
-
     return FileResponse(
         path=p,
-        media_type=mime,
+        media_type="application/zip",
         filename=name,
-        headers=_attachment_headers(name, mime, None),
+        headers={"Accept-Ranges": "bytes"}
     )
 
 
