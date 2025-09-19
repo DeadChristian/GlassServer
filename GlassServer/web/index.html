@@ -1,9 +1,58 @@
-<!doctype html>
+﻿<!doctype html>
 <meta charset="utf-8" />
-<title>GlassServer ? OK</title>
-<h1>GlassServer is running ?</h1>
-<p>
-  <a href="/healthz">/healthz</a> ?
-  <a href="/config">/config</a> ?
-  <a href="/static-check">/static-check</a>
-</p>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Glass — Download</title>
+<link rel="icon" href="/static/favicon.ico">
+<meta property="og:title" content="Glass — Download">
+<meta property="og:image" content="/static/og.png">
+<meta name="theme-color" content="#111111">
+<link rel="stylesheet" href="/static/styles.css">
+
+<main class="wrap">
+  <header class="hero">
+    <img src="/static/glass_logo.svg" alt="Glass" height="48" />
+    <h1>Make any window transparent</h1>
+    <p class="sub">Free basics. One-time $5 for Pro. No telemetry.</p>
+  </header>
+
+  <section class="cta">
+    <a class="btn" href="/download/latest" download>⬇ Download Glass.exe <span id="exeSize"></span></a>
+    <a class="btn ghost" href="/addons/latest" download>Pro Add-ons <span id="zipSize"></span></a>
+    <a class="btn ghost" href="https://gumroad.com/l/xvphp" target="_blank" rel="noreferrer">Buy Pro — $5</a>
+  </section>
+
+  <section class="faq">
+    <h2>FAQ</h2>
+    <ul>
+      <li><b>Install?</b> Just run Glass.exe. If SmartScreen appears: More info → Run anyway.</li>
+      <li><b>Unlock Pro?</b> Buy on Gumroad, then enter your license in the app.</li>
+      <li><b>Offline?</b> 7-day grace after one successful validation.</li>
+      <li><b>Shortcuts?</b> Ctrl+Enter apply · Ctrl+0 reset · Ctrl+T Top (Pro) · Ctrl+G Click-through (Pro)</li>
+    </ul>
+  </section>
+
+  <footer>
+    <a href="https://www.glassapp.me/terms" target="_blank" rel="noreferrer">Terms</a> ·
+    <a href="https://www.glassapp.me/privacy" target="_blank" rel="noreferrer">Privacy</a>
+  </footer>
+</main>
+
+<script>
+async function headSize(url) {
+  try {
+    const r = await fetch(url, { method: 'HEAD' });
+    const len = r.headers.get('content-length');
+    if (!len) return '';
+    const mb = (Number(len) / (1024*1024)).toFixed(1);
+    return `(${mb} MB)`;
+  } catch {
+    return '';
+  }
+}
+(async () => {
+  document.getElementById('exeSize').textContent = '…';
+  document.getElementById('zipSize').textContent = '…';
+  document.getElementById('exeSize').textContent = await headSize('/download/latest');
+  document.getElementById('zipSize').textContent = await headSize('/addons/latest');
+})();
+</script>
