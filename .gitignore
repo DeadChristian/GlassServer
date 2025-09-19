@@ -32,3 +32,10 @@ GlassServer/main.py.bak_*
 /main.py
 
 /main.py.bak_*
+
+.venv/
+__pycache__/
+*.pyc
+.env
+GlassServer/data/
+
