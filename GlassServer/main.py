@@ -1,4 +1,5 @@
-﻿from __future__ import annotations
+﻿# GlassServer/main.py
+from __future__ import annotations
 
 import hashlib
 import os
@@ -6,17 +7,20 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 # ---------- Settings ----------
 class Settings(BaseSettings):
+    # load from .env
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
     # public-ish
     DOMAIN: str = Field(default="https://www.glassapp.me")
-    APP_VERSION: str = Field(default="1.0.0")
+    APP_VERSION: str = Field(default="1.0.1")
     TOKEN_TTL_DAYS: int = Field(default=90)
 
     DOWNLOAD_URL_PRO: str = Field(default="https://www.glassapp.me/static/Glass.exe")
@@ -52,10 +56,6 @@ class Settings(BaseSettings):
     # computed/infra
     PYTHON_VERSION: Optional[str] = None
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-
 
 settings = Settings()
 
@@ -75,7 +75,6 @@ class CacheStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
         resp = await super().get_response(path, scope)
         if resp.status_code == 200:
-            # Long cache for fingerprinted static assets
             resp.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
         return resp
 
@@ -90,7 +89,8 @@ app.mount("/static", CacheStaticFiles(directory=str(STATIC_DIR)), name="static")
 def _etag_for_file(p: Path) -> str:
     st = p.stat()
     raw = f"{st.st_mtime_ns}-{st.st_size}".encode()
-    return hashlib.md5(raw).hexdigest()  # strong enough for cache validators here
+    return hashlib.md5(raw).hexdigest()
+
 
 def _download_response(p: Path, download_name: str) -> FileResponse:
     if not p.exists():
@@ -100,17 +100,15 @@ def _download_response(p: Path, download_name: str) -> FileResponse:
         media_type="application/octet-stream",
         filename=download_name,
     )
-    # Good caching for downloadable artifacts (1 week)
+    # good for installers; lets clients revalidate if changed
     resp.headers["Cache-Control"] = "public, max-age=604800"
     resp.headers["ETag"] = _etag_for_file(p)
-    # Content-Length is set by FileResponse; HEAD will be bodyless automatically
     return resp
 
 
 # ---------- Routes ----------
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def root():
-    # small, safe landing (works on prod + local)
     html = f"""<!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -157,7 +155,7 @@ async function headSize(url) {{
     const len = r.headers.get('content-length');
     if (!len) return '';
     const mb = (Number(len) / (1024*1024)).toFixed(1);
-    return `(${mb} MB)`;
+    return `({{mb}} MB)`;
   }} catch {{
     return '';
   }}
@@ -242,3 +240,28 @@ async def download_latest():
 @app.get("/addons/latest")
 async def addons_latest():
     return _download_response(ZIP_FILE, "pro_addons_v1.zip")
+# --- HEAD endpoints to avoid 405 locally and ensure correct headers ---
+from pathlib import Path
+from fastapi import Response
+
+def _head_file_headers(path: Path, filename: str) -> Response:
+    size = path.stat().st_size
+    return Response(
+        status_code=200,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(size),
+            "Accept-Ranges": "bytes",
+            "Content-Type": "application/octet-stream",
+        },
+    )
+
+@app.head("/download/latest")
+def head_download_latest():
+    path = STATIC_DIR / "Glass.exe"
+    return _head_file_headers(path, "Glass.exe")
+
+@app.head("/addons/latest")
+def head_addons_latest():
+    path = STATIC_DIR / "pro_addons_v1.zip"
+    return _head_file_headers(path, "pro_addons_v1.zip")
