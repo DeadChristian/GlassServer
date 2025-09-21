@@ -6,16 +6,14 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 # ---------- Settings ----------
 class Settings(BaseSettings):
-    # load from .env
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     # public-ish
@@ -59,18 +57,15 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Paths
+# ---------- Paths / static ----------
 HERE = Path(__file__).resolve().parent
 DEFAULT_STATIC = (HERE / "web" / "static").resolve()
 STATIC_DIR = Path(os.environ.get("STATIC_DIR", str(DEFAULT_STATIC))).resolve()
 
-# Files we expose
 EXE_FILE = STATIC_DIR / "Glass.exe"
 ZIP_FILE = STATIC_DIR / "pro_addons_v1.zip"
 OG_PNG = STATIC_DIR / "og.png"
 
-
-# ---------- App ----------
 class CacheStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
         resp = await super().get_response(path, scope)
@@ -78,12 +73,8 @@ class CacheStaticFiles(StaticFiles):
             resp.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
         return resp
 
-
 app = FastAPI(title="GlassServer", version=settings.APP_VERSION)
-
-# Mount /static (served from STATIC_DIR)
 app.mount("/static", CacheStaticFiles(directory=str(STATIC_DIR)), name="static")
-
 
 # ---------- Helpers ----------
 def _etag_for_file(p: Path) -> str:
@@ -91,20 +82,25 @@ def _etag_for_file(p: Path) -> str:
     raw = f"{st.st_mtime_ns}-{st.st_size}".encode()
     return hashlib.md5(raw).hexdigest()
 
-
 def _download_response(p: Path, download_name: str) -> FileResponse:
     if not p.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    resp = FileResponse(
-        path=str(p),
-        media_type="application/octet-stream",
-        filename=download_name,
-    )
-    # good for installers; lets clients revalidate if changed
+    resp = FileResponse(path=str(p), media_type="application/octet-stream", filename=download_name)
     resp.headers["Cache-Control"] = "public, max-age=604800"
     resp.headers["ETag"] = _etag_for_file(p)
     return resp
 
+def _head_file_headers(path: Path, filename: str) -> Response:
+    size = path.stat().st_size
+    return Response(
+        status_code=200,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(size),
+            "Accept-Ranges": "bytes",
+            "Content-Type": "application/octet-stream",
+        },
+    )
 
 # ---------- Routes ----------
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -170,15 +166,9 @@ async function headSize(url) {{
 """
     return HTMLResponse(content=html)
 
-
 @app.get("/healthz")
 async def healthz():
-    return {
-        "status": "ok",
-        "version": settings.APP_VERSION,
-        "static_dir": str(STATIC_DIR),
-    }
-
+    return {"status": "ok", "version": settings.APP_VERSION, "static_dir": str(STATIC_DIR)}
 
 @app.get("/config")
 async def config():
@@ -202,10 +192,7 @@ async def config():
             "starter_max_windows": settings.STARTER_MAX_WINDOWS,
             "pro_max_windows": settings.PRO_MAX_WINDOWS,
         },
-        "intro": {
-            "active": bool(settings.INTRO_ACTIVE),
-            "price_intro": str(settings.PRICE_INTRO),
-        },
+        "intro": {"active": bool(settings.INTRO_ACTIVE), "price_intro": str(settings.PRICE_INTRO)},
         "referrals_enabled": bool(settings.REFERRALS_ENABLED),
         "launch_url": settings.LAUNCH_URL,
         "skip_gumroad_validation": bool(settings.SKIP_GUMROAD_VALIDATION),
@@ -213,16 +200,10 @@ async def config():
         "debug": bool(settings.DEBUG),
     }
 
-
 @app.get("/static-check")
 async def static_check():
     def info(p: Path, href_name: str):
-        return {
-            "exists": p.exists(),
-            "size_bytes": p.stat().st_size if p.exists() else 0,
-            "href": f"/static/{href_name}",
-        }
-
+        return {"exists": p.exists(), "size_bytes": p.stat().st_size if p.exists() else 0, "href": f"/static/{href_name}"}
     files = {
         "Glass.exe": info(EXE_FILE, "Glass.exe"),
         "og.png": info(OG_PNG, "og.png"),
@@ -231,37 +212,19 @@ async def static_check():
     missing = [k for k, v in files.items() if not v["exists"]]
     return {"ok": len(missing) == 0, "missing": missing, "files": files}
 
-
 @app.get("/download/latest")
 async def download_latest():
     return _download_response(EXE_FILE, "Glass.exe")
 
-
 @app.get("/addons/latest")
 async def addons_latest():
     return _download_response(ZIP_FILE, "pro_addons_v1.zip")
-# --- HEAD endpoints to avoid 405 locally and ensure correct headers ---
-from pathlib import Path
-from fastapi import Response
 
-def _head_file_headers(path: Path, filename: str) -> Response:
-    size = path.stat().st_size
-    return Response(
-        status_code=200,
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Content-Length": str(size),
-            "Accept-Ranges": "bytes",
-            "Content-Type": "application/octet-stream",
-        },
-    )
-
+# Explicit HEAD handlers (prevents 405 and returns accurate sizes)
 @app.head("/download/latest")
 def head_download_latest():
-    path = STATIC_DIR / "Glass.exe"
-    return _head_file_headers(path, "Glass.exe")
+    return _head_file_headers(EXE_FILE, "Glass.exe")
 
 @app.head("/addons/latest")
 def head_addons_latest():
-    path = STATIC_DIR / "pro_addons_v1.zip"
-    return _head_file_headers(path, "pro_addons_v1.zip")
+    return _head_file_headers(ZIP_FILE, "pro_addons_v1.zip")
