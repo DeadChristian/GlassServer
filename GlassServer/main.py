@@ -1,95 +1,166 @@
-﻿# GlassServer/main.py
-from __future__ import annotations
+﻿from __future__ import annotations
 
-import hashlib
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict
 
-from fastapi import FastAPI, HTTPException, Response
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, Response
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# ---------- Settings ----------
+
+# -----------------------------
+# Settings (Pydantic v2, py39 safe)
+# -----------------------------
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    # public config
+    domain: str = "https://www.glassapp.me"
+    version: str = Field(default="1.0.0", validation_alias="APP_VERSION")
+    token_ttl_days: int = 90
+    download_url_pro: str = "https://www.glassapp.me/static/Glass.exe"
+    addons_url: str = "https://www.glassapp.me/static/pro_addons_v1.zip"
+    addons_version: str = "1.0.0"
 
-    # public-ish
-    DOMAIN: str = Field(default="https://www.glassapp.me")
-    APP_VERSION: str = Field(default="1.0.1")
-    TOKEN_TTL_DAYS: int = Field(default=90)
+    # sales/limits/flags
+    sales_starter_enabled: bool = False
+    sales_starter_price: str = "5"
+    sales_starter_buy_url: str = ""
+    sales_pro_enabled: bool = True
+    sales_pro_price: str = "5"
+    sales_pro_buy_url: str = "https://gumroad.com/l/xvphp"
 
-    DOWNLOAD_URL_PRO: str = Field(default="https://www.glassapp.me/static/Glass.exe")
-    ADDONS_URL: str = Field(default="https://www.glassapp.me/static/pro_addons_v1.zip")
-    ADDONS_VERSION: str = Field(default="1.0.0")
+    free_max_windows: int = 1
+    starter_max_windows: int = 2
+    pro_max_windows: int = 5
 
-    STARTER_SALES_ENABLED: int = Field(default=0)
-    STARTER_PRICE: int = Field(default=5)
-    STARTER_BUY_URL: str = Field(default="https://gumroad.com/l/kisnxu")
+    intro_active: bool = True
+    price_intro: str = "5"
 
-    PRO_SALES_ENABLED: int = Field(default=1)
-    PRO_PRICE: int = Field(default=5)
-    PRO_BUY_URL: str = Field(default="https://gumroad.com/l/xvphp")
+    referrals_enabled: bool = True
+    launch_url: str = "https://www.glassapp.me/launch"
 
-    FREE_MAX_WINDOWS: int = Field(default=1)
-    STARTER_MAX_WINDOWS: int = Field(default=2)
-    PRO_MAX_WINDOWS: int = Field(default=5)
+    skip_gumroad_validation: bool = False
+    dry_run: bool = False
+    debug: bool = False
 
-    INTRO_ACTIVE: int = Field(default=1)
-    PRICE_INTRO: int = Field(default=5)
+    # db path (for future license work)
+    db_path: str = "glass.db"
 
-    REFERRALS_ENABLED: int = Field(default=1)
-    LAUNCH_URL: str = Field(default="https://www.glassapp.me/launch")
+    # load env from ./GlassServer/.env then ./.env; ignore unknown envs
+    model_config = SettingsConfigDict(
+        env_file=("GlassServer/.env", ".env"),
+        env_prefix="",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
-    SKIP_GUMROAD_VALIDATION: bool = Field(default=False)
-    DRY_RUN: bool = Field(default=False)
-    DEBUG: bool = Field(default=False)
 
-    # private/server
-    DB_PATH: str = Field(default="glass.db")
-    ADMIN_SECRET: Optional[str] = Field(default=None)
+def public_config(s: Settings) -> Dict[str, Any]:
+    """Shape the JSON the app expects today."""
+    return {
+        "domain": s.domain,
+        "version": s.version,
+        "token_ttl_days": s.token_ttl_days,
+        "download_url_pro": s.download_url_pro,
+        "addons_url": s.addons_url,
+        "addons_version": s.addons_version,
+        "sales": {
+            "starter_enabled": s.sales_starter_enabled,
+            "starter_price": s.sales_starter_price,
+            "starter_buy_url": s.sales_starter_buy_url,
+            "pro_enabled": s.sales_pro_enabled,
+            "pro_price": s.sales_pro_price,
+            "pro_buy_url": s.sales_pro_buy_url,
+        },
+        "limits": {
+            "free_max_windows": s.free_max_windows,
+            "starter_max_windows": s.starter_max_windows,
+            "pro_max_windows": s.pro_max_windows,
+        },
+        "intro": {"active": s.intro_active, "price_intro": s.price_intro},
+        "referrals_enabled": s.referrals_enabled,
+        "launch_url": s.launch_url,
+        "skip_gumroad_validation": s.skip_gumroad_validation,
+        "dry_run": s.dry_run,
+        "debug": s.debug,
+    }
 
-    # computed/infra
-    PYTHON_VERSION: Optional[str] = None
 
+# -----------------------------
+# App + static
+# -----------------------------
+BASE_DIR = Path(__file__).resolve().parent
+WEB_DIR = BASE_DIR / "web"
+STATIC_DIR = WEB_DIR / "static"
+
+app = FastAPI(title="GlassServer", version="1.0.0")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 settings = Settings()
 
-# ---------- Paths / static ----------
-HERE = Path(__file__).resolve().parent
-DEFAULT_STATIC = (HERE / "web" / "static").resolve()
-STATIC_DIR = Path(os.environ.get("STATIC_DIR", str(DEFAULT_STATIC))).resolve()
 
-EXE_FILE = STATIC_DIR / "Glass.exe"
-ZIP_FILE = STATIC_DIR / "pro_addons_v1.zip"
-OG_PNG = STATIC_DIR / "og.png"
+# -----------------------------
+# Routes
+# -----------------------------
+@app.get("/", response_class=HTMLResponse)
+def root():
+    index = WEB_DIR / "index.html"
+    if index.exists():
+        return index.read_text(encoding="utf-8")
+    # tiny fallback page
+    return """<!doctype html>
+<meta charset="utf-8" />
+<title>GlassServer ✓ OK</title>
+<h1>GlassServer is running ✓</h1>
+<p>
+  <a href="/healthz">/healthz</a> ·
+  <a href="/config">/config</a> ·
+  <a href="/static-check">/static-check</a>
+</p>
+"""
 
-class CacheStaticFiles(StaticFiles):
-    async def get_response(self, path: str, scope):
-        resp = await super().get_response(path, scope)
-        if resp.status_code == 200:
-            resp.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
-        return resp
 
-app = FastAPI(title="GlassServer", version=settings.APP_VERSION)
-app.mount("/static", CacheStaticFiles(directory=str(STATIC_DIR)), name="static")
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok", "version": settings.version, "static_dir": str(STATIC_DIR)}
 
-# ---------- Helpers ----------
-def _etag_for_file(p: Path) -> str:
-    st = p.stat()
-    raw = f"{st.st_mtime_ns}-{st.st_size}".encode()
-    return hashlib.md5(raw).hexdigest()
 
-def _download_response(p: Path, download_name: str) -> FileResponse:
-    if not p.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-    resp = FileResponse(path=str(p), media_type="application/octet-stream", filename=download_name)
-    resp.headers["Cache-Control"] = "public, max-age=604800"
-    resp.headers["ETag"] = _etag_for_file(p)
-    return resp
+@app.get("/config")
+def config():
+    return JSONResponse(public_config(settings))
 
+
+@app.get("/static-check")
+def static_check():
+    files = {}
+    def add(name: str):
+        p = STATIC_DIR / name
+        files[name] = {
+            "exists": p.exists(),
+            "size_bytes": (p.stat().st_size if p.exists() else 0),
+            "href": f"/static/{name}",
+        }
+    for n in ("Glass.exe", "og.png", "pro_addons_v1.zip"):
+        add(n)
+    return {"ok": True, "missing": [k for k,v in files.items() if not v["exists"]], "files": files}
+
+
+# ---- downloads (GET) ----
+@app.get("/download/latest")
+def download_latest():
+    path = STATIC_DIR / "Glass.exe"
+    return FileResponse(path, filename="Glass.exe", media_type="application/octet-stream")
+
+
+@app.get("/addons/latest")
+def addons_latest():
+    path = STATIC_DIR / "pro_addons_v1.zip"
+    return FileResponse(path, filename="pro_addons_v1.zip", media_type="application/octet-stream")
+
+
+# ---- explicit HEAD (avoid 405 and set correct Content-Length) ----
 def _head_file_headers(path: Path, filename: str) -> Response:
     size = path.stat().st_size
     return Response(
@@ -102,129 +173,10 @@ def _head_file_headers(path: Path, filename: str) -> Response:
         },
     )
 
-# ---------- Routes ----------
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def root():
-    html = f"""<!doctype html>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Glass — Download</title>
-<link rel="icon" href="/static/favicon.ico">
-<meta property="og:title" content="Glass — Download">
-<meta property="og:image" content="/static/og.png">
-<meta name="theme-color" content="#111111">
-<link rel="stylesheet" href="/static/styles.css">
-
-<main class="wrap">
-  <header class="hero">
-    <img src="/static/glass_logo.svg" alt="Glass" height="48" />
-    <h1>Make any window transparent</h1>
-    <p class="sub">Free basics. One-time ${settings.PRO_PRICE} for Pro. No telemetry.</p>
-  </header>
-
-  <section class="cta">
-    <a class="btn" href="/download/latest" download>⬇ Download Glass.exe <span id="exeSize"></span></a>
-    <a class="btn ghost" href="/addons/latest"  download>Pro Add-ons <span id="zipSize"></span></a>
-    <a class="btn ghost" href="{settings.PRO_BUY_URL}" target="_blank" rel="noreferrer">Buy Pro — ${settings.PRO_PRICE}</a>
-  </section>
-
-  <section class="faq">
-    <h2>FAQ</h2>
-    <ul>
-      <li><b>Install?</b> Just run Glass.exe. If SmartScreen appears: More info → Run anyway.</li>
-      <li><b>Unlock Pro?</b> Buy on Gumroad, then enter your license in the app.</li>
-      <li><b>Offline?</b> 7-day grace after one successful validation.</li>
-      <li><b>Shortcuts?</b> Ctrl+Enter apply · Ctrl+0 reset · Ctrl+T Top (Pro) · Ctrl+G Click-through (Pro)</li>
-    </ul>
-  </section>
-
-  <footer>
-    <a href="https://www.glassapp.me/terms" target="_blank" rel="noreferrer">Terms</a> ·
-    <a href="https://www.glassapp.me/privacy" target="_blank" rel="noreferrer">Privacy</a>
-  </footer>
-</main>
-
-<script>
-async function headSize(url) {{
-  try {{
-    const r = await fetch(url, {{ method: 'HEAD' }});
-    const len = r.headers.get('content-length');
-    if (!len) return '';
-    const mb = (Number(len) / (1024*1024)).toFixed(1);
-    return `({{mb}} MB)`;
-  }} catch {{
-    return '';
-  }}
-}}
-(async () => {{
-  document.getElementById('exeSize').textContent = '…';
-  document.getElementById('zipSize').textContent = '…';
-  document.getElementById('exeSize').textContent = await headSize('/download/latest');
-  document.getElementById('zipSize').textContent = await headSize('/addons/latest');
-}})();
-</script>
-"""
-    return HTMLResponse(content=html)
-
-@app.get("/healthz")
-async def healthz():
-    return {"status": "ok", "version": settings.APP_VERSION, "static_dir": str(STATIC_DIR)}
-
-@app.get("/config")
-async def config():
-    return {
-        "domain": settings.DOMAIN,
-        "version": settings.APP_VERSION,
-        "token_ttl_days": settings.TOKEN_TTL_DAYS,
-        "download_url_pro": settings.DOWNLOAD_URL_PRO,
-        "addons_url": settings.ADDONS_URL,
-        "addons_version": settings.ADDONS_VERSION,
-        "sales": {
-            "starter_enabled": bool(settings.STARTER_SALES_ENABLED),
-            "starter_price": str(settings.STARTER_PRICE),
-            "starter_buy_url": settings.STARTER_BUY_URL if bool(settings.STARTER_SALES_ENABLED) else "",
-            "pro_enabled": bool(settings.PRO_SALES_ENABLED),
-            "pro_price": str(settings.PRO_PRICE),
-            "pro_buy_url": settings.PRO_BUY_URL,
-        },
-        "limits": {
-            "free_max_windows": settings.FREE_MAX_WINDOWS,
-            "starter_max_windows": settings.STARTER_MAX_WINDOWS,
-            "pro_max_windows": settings.PRO_MAX_WINDOWS,
-        },
-        "intro": {"active": bool(settings.INTRO_ACTIVE), "price_intro": str(settings.PRICE_INTRO)},
-        "referrals_enabled": bool(settings.REFERRALS_ENABLED),
-        "launch_url": settings.LAUNCH_URL,
-        "skip_gumroad_validation": bool(settings.SKIP_GUMROAD_VALIDATION),
-        "dry_run": bool(settings.DRY_RUN),
-        "debug": bool(settings.DEBUG),
-    }
-
-@app.get("/static-check")
-async def static_check():
-    def info(p: Path, href_name: str):
-        return {"exists": p.exists(), "size_bytes": p.stat().st_size if p.exists() else 0, "href": f"/static/{href_name}"}
-    files = {
-        "Glass.exe": info(EXE_FILE, "Glass.exe"),
-        "og.png": info(OG_PNG, "og.png"),
-        "pro_addons_v1.zip": info(ZIP_FILE, "pro_addons_v1.zip"),
-    }
-    missing = [k for k, v in files.items() if not v["exists"]]
-    return {"ok": len(missing) == 0, "missing": missing, "files": files}
-
-@app.get("/download/latest")
-async def download_latest():
-    return _download_response(EXE_FILE, "Glass.exe")
-
-@app.get("/addons/latest")
-async def addons_latest():
-    return _download_response(ZIP_FILE, "pro_addons_v1.zip")
-
-# Explicit HEAD handlers (prevents 405 and returns accurate sizes)
 @app.head("/download/latest")
 def head_download_latest():
-    return _head_file_headers(EXE_FILE, "Glass.exe")
+    return _head_file_headers(STATIC_DIR / "Glass.exe", "Glass.exe")
 
 @app.head("/addons/latest")
 def head_addons_latest():
-    return _head_file_headers(ZIP_FILE, "pro_addons_v1.zip")
+    return _head_file_headers(STATIC_DIR / "pro_addons_v1.zip", "pro_addons_v1.zip")
